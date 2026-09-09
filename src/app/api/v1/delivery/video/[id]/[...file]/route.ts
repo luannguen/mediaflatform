@@ -36,7 +36,10 @@ export async function GET(
     // 2. Resolution Variant Playlists (1080p.m3u8, 720p.m3u8, etc.)
     if (fileName.endsWith('.m3u8')) {
       const profileName = fileName.replace('.m3u8', '');
-      const variantPlaylist = await videoService.generateVariantPlaylist(assetId, profileName, baseUrl);
+      const variantPlaylist = await videoService.generateVariantPlaylist(assetId, profileName, baseUrl, asset);
+      if (!variantPlaylist) {
+        return new NextResponse('Variant playlist not found or still processing', { status: 404 });
+      }
       return new NextResponse(variantPlaylist, {
         headers: {
           'Content-Type': 'application/vnd.apple.mpegurl',
@@ -73,17 +76,21 @@ export async function GET(
     // 5. Video Segment Chunks (.ts / .m4s) - Decoupled Delivery with 307 Temporary Redirect
     if (fileName.endsWith('.ts') || fileName.endsWith('.m4s')) {
       const storage = getStorageProvider();
-      const job = await jobQueueService.getJobByAssetId(assetId);
-      const outputVersion = job?.output_version || (job?.metadata_json as any)?.output_version;
+      const outputVersion = await videoService.getActiveOutputVersion(asset);
 
-      // Extract profile name from path or filename, e.g. "segments/720p_seq0.ts" or "720p/000.ts"
+      // Extract profile name from path or filename:
+      // Case A: /api/v1/delivery/video/:id/720p/000.ts -> fileSegments: ['720p', '000.ts']
+      // Case B: /api/v1/delivery/video/:id/segments/720p_000.ts -> fileSegments: ['segments', '720p_000.ts']
+      // Case C: /api/v1/delivery/video/:id/000.ts -> fileSegments: ['000.ts']
       let profile = '720p';
       let segmentFile = fileName;
+
       if (fileSegments.length >= 2 && fileSegments[0] !== 'segments') {
         profile = fileSegments[0];
-        segmentFile = fileSegments[1];
+        segmentFile = fileSegments[fileSegments.length - 1];
       } else if (fileName.includes('_')) {
         profile = fileName.split('_')[0];
+        segmentFile = fileName.split('_').slice(1).join('_');
       }
 
       if (outputVersion) {

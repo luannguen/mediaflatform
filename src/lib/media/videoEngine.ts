@@ -197,11 +197,19 @@ export const videoEngine = {
     sourcePath: string,
     outputDir: string,
     ladderProfiles: VideoProfileDef[],
-    onProgress?: (profileName: string, percent: number) => void
+    options?:
+      | {
+          hasAudio?: boolean;
+          onProgress?: (profileName: string, percent: number) => void;
+        }
+      | ((profileName: string, percent: number) => void)
   ): Promise<HlsTranscodeResult> {
     if (!fs.existsSync(outputDir)) {
       fs.mkdirSync(outputDir, { recursive: true });
     }
+
+    const onProgress = typeof options === 'function' ? options : options?.onProgress;
+    const hasAudio = typeof options === 'object' && options?.hasAudio !== undefined ? options.hasAudio : true;
 
     const variants: GeneratedVariant[] = [];
 
@@ -215,19 +223,32 @@ export const videoEngine = {
       const segmentPattern = path.join(profileDir, '%03d.ts');
       const playlistPath = path.join(profileDir, 'index.m3u8');
 
+      // Canonical aspect ratio preservation with black letterbox/pillarbox padding and square pixels (SAR 1:1)
+      const vf = `scale=w=${profile.width}:h=${profile.height}:force_original_aspect_ratio=decrease,pad=${profile.width}:${profile.height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1`;
+      const h264Profile = profile.height >= 1080 ? 'high' : 'main';
+      const h264Level = profile.height >= 1080 ? '4.1' : '3.1';
+
+      const audioArgs = hasAudio
+        ? ['-c:a', 'aac', '-ar', '48000', '-b:a', '128k']
+        : ['-an'];
+
+      const effectiveCodecs = hasAudio
+        ? profile.codecs
+        : profile.codecs.split(',')[0]; // avc1 only if no audio stream
+
       // Execute real ffmpeg encoding and segmentation
       const ffmpegArgs = [
         '-y',
         '-i', sourcePath,
-        '-vf', `scale=w=${profile.width}:h=${profile.height}:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2`,
+        '-vf', vf,
         '-c:v', 'libx264',
+        '-profile:v', h264Profile,
+        '-level:v', h264Level,
         '-preset', 'ultrafast',
         '-crf', '23',
         '-maxrate', `${profile.bandwidth}`,
         '-bufsize', `${profile.bandwidth * 2}`,
-        '-c:a', 'aac',
-        '-ar', '48000',
-        '-b:a', '128k',
+        ...audioArgs,
         '-f', 'hls',
         '-hls_time', '4',
         '-hls_playlist_type', 'vod',
@@ -257,7 +278,7 @@ export const videoEngine = {
         resolution: `${profile.width}x${profile.height}`,
         bandwidth: profile.bandwidth,
         avgBandwidth: profile.avgBandwidth,
-        codecs: profile.codecs,
+        codecs: effectiveCodecs,
         playlistFileName: `${profile.name}.m3u8`,
         playlistContent: rawPlaylistContent,
         segments: segmentFiles.map((f) => ({

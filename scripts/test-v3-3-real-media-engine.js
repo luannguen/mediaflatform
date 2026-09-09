@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync, execSync } = require('child_process');
 const ffmpeg = require('@ffmpeg-installer/ffmpeg');
+const ffprobe = require('@ffprobe-installer/ffprobe');
 
 // 1. Load environment variables from .env.local if present
 if (fs.existsSync('.env.local')) {
@@ -177,9 +178,11 @@ async function runRealMediaEngineTests() {
     // ----------------------------------------------------
     // STEP 5: End-to-End Playback Graph & Catch-All Route Verification
     // ----------------------------------------------------
-    console.log('\n--- STEP 5: Real HLS Playback Graph & Catch-all Route ---');
+    // STEP 5: End-to-End Playback Graph Traversal & Binary Stream Verification
+    // ----------------------------------------------------
+    console.log('\n--- STEP 5: Real HLS Playback Graph Traversal & Binary Verification ---');
     
-    // 1. Master Playlist
+    // 1. Master Playlist: Real Storage Manifest
     const masterRes = await fetch(`${BASE_URL}/api/v1/delivery/video/${realAssetId}/master.m3u8`);
     assert(masterRes.status === 200, `GET master.m3u8 returned HTTP 200`);
     const masterText = await masterRes.text();
@@ -187,33 +190,74 @@ async function runRealMediaEngineTests() {
     assert(masterText.includes('#EXT-X-VERSION:6'), `Master playlist complies with Apple HLS Version 6`);
     assert(masterText.includes('720p.m3u8'), `Master playlist references 720p.m3u8`);
 
-    // 2. Variant Playlist
-    const variantRes = await fetch(`${BASE_URL}/api/v1/delivery/video/${realAssetId}/720p.m3u8`);
-    assert(variantRes.status === 200, `GET 720p.m3u8 returned HTTP 200`);
+    // Parse Variant URI dynamically from Master Playlist (Graph Edge 1)
+    const variantMatch = masterText.match(/([a-zA-Z0-9_-]+\.m3u8)/);
+    const resolvedVariantPath = variantMatch ? variantMatch[1] : '720p.m3u8';
+    assert(!!variantMatch, `Successfully traversed Master -> Variant URI: ${resolvedVariantPath}`);
+
+    // 2. Variant Playlist: Real Segments Manifest (Graph Edge 2)
+    const variantRes = await fetch(`${BASE_URL}/api/v1/delivery/video/${realAssetId}/${resolvedVariantPath}`);
+    assert(variantRes.status === 200, `GET ${resolvedVariantPath} returned HTTP 200`);
     const variantText = await variantRes.text();
     assert(variantText.includes('#EXT-X-TARGETDURATION'), `Variant playlist includes #EXT-X-TARGETDURATION`);
+    assert(!variantText.includes('_seq0.ts'), `SYNTHETIC LOGIC PURGED: Variant playlist has NO synthetic _seq placeholders`);
     assert(variantText.includes('.ts'), `Variant playlist contains real .ts segment references`);
+
+    // Parse Actual Segment URI dynamically from Variant Playlist (Graph Edge 3)
+    const segmentMatches = variantText
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.endsWith('.ts') && !l.startsWith('#'));
+    assert(segmentMatches.length > 0, `Parsed ${segmentMatches.length} actual segment URIs from real variant playlist`);
+    const firstSegmentUri = segmentMatches[0]; // e.g. "720p/000.ts"
 
     // 3. Smart Poster Frame (Extracted from real video frame at 1s)
     const posterRes = await fetch(`${BASE_URL}/api/v1/delivery/video/${realAssetId}/poster.webp`);
     assert(posterRes.status === 200, `GET poster.webp returned HTTP 200`);
     assert(posterRes.headers.get('content-type')?.includes('image/webp'), `Poster frame Content-Type is image/webp`);
     const posterBytes = await posterRes.arrayBuffer();
-    assert(posterBytes.byteLength > 500, `Poster frame contains valid image binary (${posterBytes.byteLength} bytes)`);
+    assert(posterBytes.byteLength > 2000, `Poster frame contains valid high-res image binary (${posterBytes.byteLength} bytes)`);
 
     // 4. 3-Second Animated Preview Trailer
     const trailerRes = await fetch(`${BASE_URL}/api/v1/delivery/video/${realAssetId}/trailer.webp`);
     assert(trailerRes.status === 200, `GET trailer.webp returned HTTP 200`);
     assert(trailerRes.headers.get('content-type')?.includes('image/webp'), `Trailer preview Content-Type is image/webp`);
     const trailerBytes = await trailerRes.arrayBuffer();
-    assert(trailerBytes.byteLength > 1000, `Trailer preview contains animated binary (${trailerBytes.byteLength} bytes)`);
+    assert(trailerBytes.byteLength > 2000, `Trailer preview contains animated binary (${trailerBytes.byteLength} bytes)`);
 
-    // 5. Segment 307 Redirect to Storage
-    const segmentRes = await fetch(`${BASE_URL}/api/v1/delivery/video/${realAssetId}/720p/000.ts`, {
+    // 5. Segment 307 Redirect & Binary Stream Verification via FFprobe (Graph Edge 4)
+    const segmentRes = await fetch(`${BASE_URL}/api/v1/delivery/video/${realAssetId}/${firstSegmentUri}`, {
       redirect: 'manual',
     });
-    assert(segmentRes.status === 307, `Segment request returned HTTP 307 Redirect (got: ${segmentRes.status})`);
-    assert(!!segmentRes.headers.get('location'), `Segment redirect contains Location header`);
+    assert(segmentRes.status === 307, `Segment request ${firstSegmentUri} returned HTTP 307 Redirect (got: ${segmentRes.status})`);
+    const segmentLocation = segmentRes.headers.get('location');
+    assert(!!segmentLocation, `Segment redirect contains Location header: ${segmentLocation?.slice(0, 60)}...`);
+
+    // Download segment binary from storage location and verify real codecs with FFprobe
+    const segmentFetchRes = await fetch(segmentLocation);
+    assert(segmentFetchRes.ok, `Fetched segment binary from storage location (HTTP ${segmentFetchRes.status})`);
+    const segmentBuf = Buffer.from(await segmentFetchRes.arrayBuffer());
+    assert(segmentBuf.length > 5000, `Downloaded segment payload (${segmentBuf.length} bytes)`);
+
+    const tempSegFile = path.join(__dirname, `test-seg-${Date.now()}.ts`);
+    fs.writeFileSync(tempSegFile, segmentBuf);
+    try {
+      const segProbeRes = execFileSync(ffprobe.path, [
+        '-v', 'error',
+        '-show_entries', 'stream=codec_name,codec_type',
+        '-of', 'json',
+        tempSegFile,
+      ], { encoding: 'utf8' });
+      const segJson = JSON.parse(segProbeRes);
+      const hasV = segJson.streams?.some((s) => s.codec_type === 'video' && s.codec_name === 'h264');
+      const hasA = segJson.streams?.some((s) => s.codec_type === 'audio' && s.codec_name === 'aac');
+      assert(hasV, `REAL STREAM VERIFIED: Downloaded segment contains genuine h264 video track`);
+      assert(hasA, `REAL STREAM VERIFIED: Downloaded segment contains genuine aac audio track`);
+    } finally {
+      if (fs.existsSync(tempSegFile)) {
+        try { fs.unlinkSync(tempSegFile); } catch {}
+      }
+    }
   } catch (err) {
     assert(false, `Real media pipeline failed: ${err.message}`);
   } finally {

@@ -27,6 +27,7 @@ export interface StorageProvider {
   getSignedDownloadUrl(key: string, expiresInSeconds?: number, bucket?: string): Promise<string>;
   getPublicUrl(key: string, bucket?: string): string;
   exists(key: string, bucket?: string): Promise<boolean>;
+  download(key: string, bucket?: string): Promise<Buffer | null>;
   createPresignedUploadUrl(
     key: string,
     mimeType: string,

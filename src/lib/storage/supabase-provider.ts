@@ -1,6 +1,8 @@
 import { StorageProvider, StorageUploadResult } from './provider';
 import { supabaseAdmin, isSupabaseAdminConfigured } from '../supabase/admin';
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 
 export class SupabaseStorageProvider implements StorageProvider {
   public readonly name = 'supabase';
@@ -10,6 +12,23 @@ export class SupabaseStorageProvider implements StorageProvider {
     this.defaultBucket = defaultBucket;
   }
 
+  private saveToLocalCache(key: string, data: Buffer | Uint8Array | Blob, bucket: string) {
+    try {
+      const localDir = path.join(process.cwd(), 'scratch', 'storage', bucket, path.dirname(key));
+      if (!fs.existsSync(localDir)) {
+        fs.mkdirSync(localDir, { recursive: true });
+      }
+      const localFile = path.join(process.cwd(), 'scratch', 'storage', bucket, key);
+      if (data instanceof Buffer) {
+        fs.writeFileSync(localFile, data);
+      } else if (data instanceof Uint8Array) {
+        fs.writeFileSync(localFile, Buffer.from(data));
+      }
+    } catch {
+      // Non-blocking local cache write
+    }
+  }
+
   async upload(
     data: Buffer | Uint8Array | Blob,
     key: string,
@@ -17,6 +36,7 @@ export class SupabaseStorageProvider implements StorageProvider {
     bucket: string = this.defaultBucket
   ): Promise<StorageUploadResult> {
     const sizeBytes = data instanceof Blob ? data.size : data.byteLength;
+    this.saveToLocalCache(key, data, bucket);
 
     if (!isSupabaseAdminConfigured()) {
       // Mock / Dev fallback: generate data URI so images can render and transform locally
@@ -96,6 +116,30 @@ export class SupabaseStorageProvider implements StorageProvider {
     });
     if (error || !data) return false;
     return data.some((item) => item.name === key);
+  }
+
+  async download(key: string, bucket: string = this.defaultBucket): Promise<Buffer | null> {
+    if (isSupabaseAdminConfigured()) {
+      try {
+        const { data, error } = await supabaseAdmin.storage.from(bucket).download(key);
+        if (!error && data) {
+          const arrayBuffer = await data.arrayBuffer();
+          return Buffer.from(arrayBuffer);
+        }
+      } catch (err: any) {
+        console.warn(`[Storage] Supabase download error for ${key}:`, err.message);
+      }
+    }
+
+    // Fallback to local cache if Supabase is offline or not configured
+    try {
+      const localFile = path.join(process.cwd(), 'scratch', 'storage', bucket, key);
+      if (fs.existsSync(localFile)) {
+        return fs.readFileSync(localFile);
+      }
+    } catch {}
+
+    return null;
   }
 
   async createPresignedUploadUrl(

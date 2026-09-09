@@ -272,6 +272,7 @@ export const jobQueueService = {
         p_job_id: jobId,
         p_worker_id: workerId,
         p_lease_seconds: leaseSeconds,
+        p_job_run_id: runId || null,
       });
 
       if (!error && typeof data === 'boolean') {

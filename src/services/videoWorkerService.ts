@@ -147,7 +147,10 @@ export const videoWorkerService = {
       }, leaseContext);
 
       // Execute real ffmpeg encoding and HLS packaging
-      const hlsResult = await videoEngine.transcodeToHls(sourcePath, workDir, targetLadder);
+      const hasAudio = probeResult.audioCodec !== 'none';
+      const hlsResult = await videoEngine.transcodeToHls(sourcePath, workDir, targetLadder, {
+        hasAudio,
+      });
 
       // Verify lease after heavy transcoding
       const transcodeLease = await jobQueueService.renewHeartbeat(job.id, workerId, job.job_run_id || undefined);
