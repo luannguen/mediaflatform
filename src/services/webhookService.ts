@@ -54,20 +54,26 @@ export const webhookService = {
   },
 
   /**
-   * Dispatch an event to all active matching webhook endpoints (Section 50 & 51)
+   * Dispatch an event to all active matching webhook endpoints with optional deterministic Event ID
    */
-  async dispatchEvent(workspaceId: string, eventType: string, dataPayload: any) {
+  async dispatchEvent(
+    workspaceId: string,
+    eventType: string,
+    dataPayload: any,
+    options?: { eventId?: string }
+  ) {
     const endpoints = await this.listEndpoints(workspaceId);
     const matching = endpoints.filter(
       (e) => e.status === 'active' && (e.events.includes('*') || e.events.includes(eventType))
     );
 
-    const eventId = `evt_${Date.now().toString(36)}_${crypto.randomBytes(4).toString('hex')}`;
+    // Prefer deterministic event ID for idempotent consumer deduplication
+    const eventId = options?.eventId || dataPayload?.event_id || `evt_${Date.now().toString(36)}_${crypto.randomBytes(4).toString('hex')}`;
     const payload = {
       event_id: eventId,
       event_type: eventType,
       created_at: new Date().toISOString(),
-      data: dataPayload,
+      data: { ...dataPayload, event_id: eventId },
     };
 
     // Asynchronously dispatch without blocking caller

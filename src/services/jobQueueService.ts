@@ -33,6 +33,18 @@ export const PERMANENT_ERRORS = new Set<string>([
   'HLS_VALIDATION_FAILED',
 ]);
 
+export class LeaseLostError extends Error {
+  constructor(message: string = 'LEASE_LOST: Job lease expired or reclaimed by another worker') {
+    super(message);
+    this.name = 'LeaseLostError';
+  }
+}
+
+export interface LeaseContext {
+  workerId: string;
+  runId?: string;
+}
+
 export interface EnqueueJobInput {
   assetId: string;
   workspaceId?: string;
@@ -236,6 +248,7 @@ export const jobQueueService = {
   async renewHeartbeat(
     jobId: string,
     workerId: string,
+    runId?: string,
     leaseSeconds: number = 300
   ): Promise<boolean> {
     const now = new Date().toISOString();
@@ -245,6 +258,8 @@ export const jobQueueService = {
       const job = mockDb.processingJobs.find((j) => j.id === jobId);
       if (!job || job.status !== 'processing') return false;
       if (job.locked_by && job.locked_by !== workerId) return false;
+      if (runId && job.job_run_id && job.job_run_id !== runId) return false;
+      if (job.lease_expires_at && new Date(job.lease_expires_at).getTime() < Date.now()) return false;
 
       job.heartbeat_at = now;
       job.lease_expires_at = leaseExpiry;
@@ -266,8 +281,8 @@ export const jobQueueService = {
       // Fallback below
     }
 
-    // Direct update fallback
-    const { data: updated } = await supabaseAdmin
+    // Direct update fallback with fencing
+    let query = supabaseAdmin
       .from('processing_jobs')
       .update({
         heartbeat_at: now,
@@ -276,20 +291,26 @@ export const jobQueueService = {
       })
       .eq('id', jobId)
       .eq('status', 'processing')
-      .select('id')
-      .maybeSingle();
+      .eq('locked_by', workerId)
+      .gt('lease_expires_at', now);
 
+    if (runId) {
+      query = query.eq('job_run_id', runId);
+    }
+
+    const { data: updated } = await query.select('id').maybeSingle();
     return !!updated;
   },
 
   /**
-   * Update progress, current stage, and heartbeat
+   * Update progress, current stage, and heartbeat with Fencing
    */
   async updateJobProgress(
     jobId: string,
     stage: JobStage,
     progress: number,
-    metadata?: Record<string, any>
+    metadata?: Record<string, any>,
+    leaseContext?: LeaseContext
   ): Promise<ProcessingJob> {
     const now = new Date().toISOString();
     const clampedProgress = Math.max(0, Math.min(100, Math.round(progress)));
@@ -297,6 +318,18 @@ export const jobQueueService = {
     if (!isSupabaseAdminConfigured()) {
       const job = mockDb.processingJobs.find((j) => j.id === jobId);
       if (!job) throw AppError.notFound(`Job ${jobId} not found`);
+
+      if (leaseContext) {
+        if (job.locked_by && job.locked_by !== leaseContext.workerId) {
+          throw new LeaseLostError(`LEASE_LOST: Job ${jobId} locked by ${job.locked_by}, not ${leaseContext.workerId}`);
+        }
+        if (leaseContext.runId && job.job_run_id && job.job_run_id !== leaseContext.runId) {
+          throw new LeaseLostError(`LEASE_LOST: Job run ID mismatch for ${jobId}`);
+        }
+        if (job.lease_expires_at && new Date(job.lease_expires_at).getTime() < Date.now()) {
+          throw new LeaseLostError(`LEASE_LOST: Job lease expired for ${jobId}`);
+        }
+      }
 
       job.current_stage = stage;
       job.progress = clampedProgress;
@@ -308,7 +341,7 @@ export const jobQueueService = {
       return job;
     }
 
-    const { data, error } = await supabaseAdmin
+    let query = supabaseAdmin
       .from('processing_jobs')
       .update({
         current_stage: stage,
@@ -318,23 +351,37 @@ export const jobQueueService = {
         ...(metadata ? { metadata_json: metadata } : {}),
       })
       .eq('id', jobId)
-      .select()
-      .single();
+      .eq('status', 'processing');
+
+    if (leaseContext) {
+      query = query
+        .eq('locked_by', leaseContext.workerId)
+        .gt('lease_expires_at', now);
+      if (leaseContext.runId) {
+        query = query.eq('job_run_id', leaseContext.runId);
+      }
+    }
+
+    const { data, error } = await query.select().maybeSingle();
 
     if (error || !data) {
-      throw AppError.internal(`Failed to update job progress: ${error?.message || 'Unknown error'}`);
+      if (leaseContext) {
+        throw new LeaseLostError(`LEASE_LOST: Fencing failed for job ${jobId}`);
+      }
+      throw AppError.internal(`Failed to update job progress: ${error?.message || 'Job not in processing state'}`);
     }
 
     return data as ProcessingJob;
   },
 
   /**
-   * Mark job completed and persist output manifest
+   * Mark job completed and persist output manifest with Fencing Token
    */
   async completeJob(
     jobId: string,
     outputManifest: Record<string, any>,
-    outputVersion?: string
+    outputVersion?: string,
+    leaseContext?: LeaseContext
   ): Promise<ProcessingJob> {
     const now = new Date().toISOString();
     const version = outputVersion || `v1_${Date.now()}`;
@@ -342,6 +389,18 @@ export const jobQueueService = {
     if (!isSupabaseAdminConfigured()) {
       const job = mockDb.processingJobs.find((j) => j.id === jobId);
       if (!job) throw AppError.notFound(`Job ${jobId} not found`);
+
+      if (leaseContext) {
+        if (job.locked_by && job.locked_by !== leaseContext.workerId) {
+          throw new LeaseLostError(`LEASE_LOST: Job ${jobId} locked by ${job.locked_by}, not ${leaseContext.workerId}`);
+        }
+        if (leaseContext.runId && job.job_run_id && job.job_run_id !== leaseContext.runId) {
+          throw new LeaseLostError(`LEASE_LOST: Job run ID mismatch for ${jobId}`);
+        }
+        if (job.lease_expires_at && new Date(job.lease_expires_at).getTime() < Date.now()) {
+          throw new LeaseLostError(`LEASE_LOST: Job lease expired for ${jobId}`);
+        }
+      }
 
       job.status = 'completed';
       job.current_stage = 'ready';
@@ -370,7 +429,7 @@ export const jobQueueService = {
       return job;
     }
 
-    const { data: job, error } = await supabaseAdmin
+    let query = supabaseAdmin
       .from('processing_jobs')
       .update({
         status: 'completed',
@@ -384,18 +443,44 @@ export const jobQueueService = {
         metadata_json: { output_manifest: outputManifest },
       })
       .eq('id', jobId)
-      .select()
-      .single();
+      .eq('status', 'processing');
 
-    if (error || !job) {
-      throw AppError.internal(`Failed to complete job: ${error?.message || 'Unknown error'}`);
+    if (leaseContext) {
+      query = query
+        .eq('locked_by', leaseContext.workerId)
+        .gt('lease_expires_at', now);
+      if (leaseContext.runId) {
+        query = query.eq('job_run_id', leaseContext.runId);
+      }
     }
 
-    // Update parent asset
+    const { data: job, error } = await query.select().maybeSingle();
+
+    if (error || !job) {
+      if (leaseContext) {
+        throw new LeaseLostError(`LEASE_LOST: Fencing failed for job ${jobId} upon completion`);
+      }
+      throw AppError.internal(`Failed to complete job: ${error?.message || 'Job not in processing state'}`);
+    }
+
+    // Update parent asset ONLY after verified fenced completion
+    const { data: existingAsset } = await supabaseAdmin
+      .from('assets')
+      .select('metadata_json')
+      .eq('id', job.asset_id)
+      .maybeSingle();
+
+    const mergedMetadata = {
+      ...(existingAsset?.metadata_json || {}),
+      hls: outputManifest,
+      active_output_version: version,
+    };
+
     await supabaseAdmin
       .from('assets')
       .update({
         processing_status: 'ready',
+        metadata_json: mergedMetadata,
         updated_at: now,
       })
       .eq('id', job.asset_id);
@@ -404,14 +489,15 @@ export const jobQueueService = {
   },
 
   /**
-   * Record failure with Retry Taxonomy and Exponential Backoff or Dead Letter Queue
+   * Record failure with Retry Taxonomy and Exponential Backoff or Dead Letter Queue with Fencing
    */
   async failJob(
     jobId: string,
     errorCode: string,
     errorMessage: string,
     retryable: boolean = true,
-    errorDetails: Record<string, any> = {}
+    errorDetails: Record<string, any> = {},
+    leaseContext?: LeaseContext
   ): Promise<ProcessingJob> {
     const now = new Date().toISOString();
     const isPermanent = PERMANENT_ERRORS.has(errorCode);
@@ -420,6 +506,15 @@ export const jobQueueService = {
     if (!isSupabaseAdminConfigured()) {
       const job = mockDb.processingJobs.find((j) => j.id === jobId);
       if (!job) throw AppError.notFound(`Job ${jobId} not found`);
+
+      if (leaseContext) {
+        if (job.locked_by && job.locked_by !== leaseContext.workerId) {
+          throw new LeaseLostError(`LEASE_LOST: Job ${jobId} locked by ${job.locked_by}, not ${leaseContext.workerId}`);
+        }
+        if (leaseContext.runId && job.job_run_id && job.job_run_id !== leaseContext.runId) {
+          throw new LeaseLostError(`LEASE_LOST: Job run ID mismatch for ${jobId}`);
+        }
+      }
 
       const canRetry = isExplicitRetryable && job.attempt < job.max_attempts;
 
@@ -468,7 +563,7 @@ export const jobQueueService = {
     const backoffMs = canRetry ? (BACKOFF_SCHEDULE_MS[current.attempt - 1] || 600000) : 0;
     const availableAt = canRetry ? new Date(Date.now() + backoffMs).toISOString() : now;
 
-    const { data, error } = await supabaseAdmin
+    let query = supabaseAdmin
       .from('processing_jobs')
       .update({
         status: nextStatus,
@@ -485,11 +580,21 @@ export const jobQueueService = {
         completed_at: canRetry ? null : now,
         updated_at: now,
       })
-      .eq('id', jobId)
-      .select()
-      .single();
+      .eq('id', jobId);
+
+    if (leaseContext) {
+      query = query.eq('locked_by', leaseContext.workerId);
+      if (leaseContext.runId) {
+        query = query.eq('job_run_id', leaseContext.runId);
+      }
+    }
+
+    const { data, error } = await query.select().maybeSingle();
 
     if (error || !data) {
+      if (leaseContext) {
+        throw new LeaseLostError(`LEASE_LOST: Fencing failed for failJob on ${jobId}`);
+      }
       throw AppError.internal(`Failed to record job failure: ${error?.message || 'Unknown error'}`);
     }
 

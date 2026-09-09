@@ -15,14 +15,10 @@ export async function POST(req: NextRequest) {
       body = {};
     }
 
-    const { job_id: jobId, worker_id: workerId } = body;
+    const workerId = body.worker_id || principal.workerId || 'worker_http';
 
-    let processedJob = null;
-    if (jobId) {
-      processedJob = await videoWorkerService.processJob(jobId, workerId || 'worker_http');
-    } else {
-      processedJob = await videoWorkerService.processNextQueuedJob(workerId || 'worker_http');
-    }
+    // Strictly enforce atomic claiming: Never allow direct bypass of claim_next_processing_job
+    const processedJob = await videoWorkerService.processNextQueuedJob(workerId);
 
     if (!processedJob) {
       return successResponse({

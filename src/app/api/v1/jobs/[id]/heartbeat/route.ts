@@ -19,10 +19,11 @@ export async function POST(
       body = {};
     }
 
-    const workerId = body.worker_id || 'worker_external';
+    const workerId = body.worker_id || principal.workerId || 'worker_external';
+    const runId = body.run_id || undefined;
     const leaseSeconds = body.lease_seconds || 300;
 
-    const renewed = await jobQueueService.renewHeartbeat(jobId, workerId, leaseSeconds);
+    const renewed = await jobQueueService.renewHeartbeat(jobId, workerId, runId, leaseSeconds);
     if (!renewed) {
       throw AppError.badRequest('Lease renewal failed: Job is not processing or lease has been claimed by another worker');
     }

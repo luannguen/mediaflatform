@@ -53,35 +53,14 @@ process.on('SIGTERM', () => handleShutdown('SIGTERM'));
 
 async function startDaemon() {
   const BASE_URL = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
-  let cookieHeader = '';
+  const workerToken = process.env.WORKER_SERVICE_TOKEN;
 
-  if (!process.env.ADMIN_EMAIL || !process.env.ADMIN_PASSWORD) {
-    console.error('[QueueDaemon] Error: ADMIN_EMAIL and ADMIN_PASSWORD must be defined in environment.');
+  if (!workerToken) {
+    console.error('[QueueDaemon] Error: WORKER_SERVICE_TOKEN must be defined in environment or .env.local.');
     process.exit(1);
   }
 
-  // Authenticate as system service / admin
-  try {
-    const loginRes = await fetch(`${BASE_URL}/api/v1/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        email: process.env.ADMIN_EMAIL,
-        password: process.env.ADMIN_PASSWORD,
-      }),
-    });
-
-    const setCookies = loginRes.headers.getSetCookie ? loginRes.headers.getSetCookie() : [loginRes.headers.get('set-cookie')];
-    cookieHeader = setCookies.map((c) => c?.split(';')[0]).filter(Boolean).join('; ');
-    if (!loginRes.ok) {
-      console.error('[QueueDaemon] Failed to authenticate worker:', loginRes.status);
-      process.exit(1);
-    }
-    console.log('[QueueDaemon] Worker authenticated with system credentials.');
-  } catch (err) {
-    console.error('[QueueDaemon] Worker authentication error:', err.message);
-    process.exit(1);
-  }
+  console.log(`[QueueDaemon] Dedicated Service Worker Identity verified (token: ${workerToken.slice(0, 12)}...)`);
 
   while (isRunning) {
     try {
@@ -90,7 +69,8 @@ async function startDaemon() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Cookie': cookieHeader,
+          'Authorization': `Bearer ${workerToken}`,
+          'X-Worker-Id': workerId,
         },
         body: JSON.stringify({ worker_id: workerId }),
       });

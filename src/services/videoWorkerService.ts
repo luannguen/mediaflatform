@@ -1,70 +1,90 @@
-import { jobQueueService } from './jobQueueService';
+import { jobQueueService, LeaseLostError, LeaseContext } from './jobQueueService';
 import { assetService } from './assetService';
 import { webhookService } from './webhookService';
 import { ProcessingJob, Asset } from '@/types/database';
 import { AppError } from '@/lib/errors/app-error';
-import sharp from 'sharp';
+import { videoEngine, VideoProfileDef, CANONICAL_LADDER } from '@/lib/media/videoEngine';
+import { isSupabaseAdminConfigured, supabaseAdmin } from '@/lib/supabase/admin';
+import { getStorageProvider } from '@/lib/storage/factory';
+import fs from 'fs';
+import path from 'path';
 
-export interface VideoProfileDef {
-  name: string;
-  width: number;
-  height: number;
-  bandwidth: number;
-  avgBandwidth: number;
-  codecs: string;
-}
-
-export const CANONICAL_LADDER: VideoProfileDef[] = [
-  {
-    name: '1080p',
-    width: 1920,
-    height: 1080,
-    bandwidth: 4800000,
-    avgBandwidth: 4500000,
-    codecs: 'avc1.640028,mp4a.40.2',
-  },
-  {
-    name: '720p',
-    width: 1280,
-    height: 720,
-    bandwidth: 2700000,
-    avgBandwidth: 2500000,
-    codecs: 'avc1.4d401f,mp4a.40.2',
-  },
-  {
-    name: '480p',
-    width: 854,
-    height: 480,
-    bandwidth: 1350000,
-    avgBandwidth: 1200000,
-    codecs: 'avc1.4d401e,mp4a.40.2',
-  },
-  {
-    name: '360p',
-    width: 640,
-    height: 360,
-    bandwidth: 700000,
-    avgBandwidth: 600000,
-    codecs: 'avc1.4d401e,mp4a.40.2',
-  },
-];
+export { CANONICAL_LADDER };
+export type { VideoProfileDef };
 
 export const videoWorkerService = {
-  /**
-   * Determine the adaptive encoding ladder without upscaling
-   * Rule: If source is 720p, generate [720p, 480p, 360p]. NEVER generate 1080p.
-   */
   resolveLadderProfiles(sourceHeight: number = 720): VideoProfileDef[] {
-    const eligible = CANONICAL_LADDER.filter((p) => p.height <= sourceHeight);
-    return eligible.length > 0 ? eligible : [CANONICAL_LADDER[CANONICAL_LADDER.length - 1]];
+    return videoEngine.resolveLadderProfiles(sourceHeight);
   },
 
   /**
-   * Execute full multi-stage processing pipeline for a claimed job
+   * Helper to stage the source video file locally for ffprobe/ffmpeg processing
+   */
+  async stageSourceVideo(asset: Asset, targetPath: string): Promise<string> {
+    const parentDir = path.dirname(targetPath);
+    if (!fs.existsSync(parentDir)) {
+      fs.mkdirSync(parentDir, { recursive: true });
+    }
+
+    // 1. Check if asset storage_key points to an existing local file
+    if (asset.storage_key && fs.existsSync(asset.storage_key)) {
+      fs.copyFileSync(asset.storage_key, targetPath);
+      return targetPath;
+    }
+
+    // 2. Download from Supabase Storage if configured
+    if (isSupabaseAdminConfigured() && asset.storage_key) {
+      try {
+        const { data, error } = await supabaseAdmin.storage
+          .from(process.env.SUPABASE_STORAGE_BUCKET || 'media-assets')
+          .download(asset.storage_key);
+        if (!error && data) {
+          const buffer = Buffer.from(await data.arrayBuffer());
+          fs.writeFileSync(targetPath, buffer);
+          return targetPath;
+        }
+      } catch (err: any) {
+        console.warn(`[VideoWorker] Failed to download from Supabase storage: ${err.message}`);
+      }
+    }
+
+    // 3. If storage_url is a data URI (mock fallback)
+    if (asset.storage_url && asset.storage_url.startsWith('data:')) {
+      const parts = asset.storage_url.split(',');
+      if (parts[1]) {
+        fs.writeFileSync(targetPath, Buffer.from(parts[1], 'base64'));
+        return targetPath;
+      }
+    }
+
+    // 4. If storage_url is an http/https URL
+    if (asset.storage_url && (asset.storage_url.startsWith('http://') || asset.storage_url.startsWith('https://'))) {
+      try {
+        const res = await fetch(asset.storage_url);
+        if (res.ok) {
+          const buffer = Buffer.from(await res.arrayBuffer());
+          fs.writeFileSync(targetPath, buffer);
+          return targetPath;
+        }
+      } catch (err: any) {
+        console.warn(`[VideoWorker] Failed to fetch video from storage_url: ${err.message}`);
+      }
+    }
+
+    throw new Error(`SOURCE_NOT_FOUND: Could not acquire source video data for asset ${asset.id}`);
+  },
+
+  /**
+   * Execute real multi-stage media processing pipeline for a claimed job
    */
   async processJob(jobId: string, workerId: string = 'worker_service'): Promise<ProcessingJob> {
     const job = await jobQueueService.getJobById(jobId);
     if (!job) throw AppError.notFound(`Job ${jobId} not found`);
+
+    const leaseContext: LeaseContext = {
+      workerId,
+      runId: job.job_run_id || undefined,
+    };
 
     const asset = await assetService.getAssetById(job.asset_id, job.workspace_id);
     if (!asset) {
@@ -73,170 +93,213 @@ export const videoWorkerService = {
         'SOURCE_NOT_FOUND',
         `Source asset ${job.asset_id} does not exist`,
         false,
-        { asset_id: job.asset_id, worker_id: workerId }
+        { asset_id: job.asset_id, worker_id: workerId },
+        leaseContext
       );
     }
 
     const outputVersion = `v${job.attempt || 1}_${(job.job_run_id || 'run').slice(-8)}`;
+    const workDir = path.join(process.cwd(), 'scratch', 'transcode', `${job.id}_${Date.now()}`);
+    const sourcePath = path.join(workDir, 'source.mp4');
 
     try {
+      if (!fs.existsSync(workDir)) {
+        fs.mkdirSync(workDir, { recursive: true });
+      }
+
+      // Check heartbeat & verify lease ownership
+      const initialLease = await jobQueueService.renewHeartbeat(job.id, workerId, job.job_run_id || undefined);
+      if (!initialLease) {
+        throw new LeaseLostError(`LEASE_LOST: Job ${job.id} lease expired or held by another worker`);
+      }
+
       // ----------------------------------------------------
-      // STAGE 1: PROBING (Metadata & Geometry Extraction)
+      // STAGE 1: STAGING & PROBING (Metadata & Geometry Extraction)
       // ----------------------------------------------------
       await jobQueueService.updateJobProgress(job.id, 'probing', 15, {
-        stage_message: 'Probing source video container and stream metrics...',
+        stage_message: 'Staging source file and probing container with ffprobe...',
         worker_id: workerId,
         output_version: outputVersion,
-      });
+      }, leaseContext);
 
-      // Renew heartbeat & verify lease ownership
-      await jobQueueService.renewHeartbeat(job.id, workerId);
+      // Stage file locally
+      await this.stageSourceVideo(asset, sourcePath);
 
-      // Derive source video properties (default to 720p if unknown)
-      const sourceHeight = asset.height || 720;
-      const sourceWidth = asset.width || 1280;
-      const durationMs = asset.duration_ms || 180000;
-      const durationSec = Math.round(durationMs / 1000);
+      // Probe container and streams with real ffprobe
+      const probeResult = await videoEngine.probeVideo(sourcePath);
 
-      const probeData = {
-        width: sourceWidth,
-        height: sourceHeight,
-        duration_ms: durationMs,
-        duration_sec: durationSec,
-        aspect_ratio: `${sourceWidth}:${sourceHeight}`,
-        codec: 'h264',
-        audio_codec: 'aac',
-        fps: 30,
-        bitrate: 2500000,
-      };
+      // Verify lease before proceeding to heavy transcode
+      const probeLease = await jobQueueService.renewHeartbeat(job.id, workerId, job.job_run_id || undefined);
+      if (!probeLease) {
+        throw new LeaseLostError(`LEASE_LOST: Job ${job.id} lease expired during probing`);
+      }
 
       // ----------------------------------------------------
       // STAGE 2: TRANSCODING & NON-UPSCALING LADDER SELECTION
       // ----------------------------------------------------
-      await jobQueueService.updateJobProgress(job.id, 'transcoding', 35, {
-        stage_message: `Applying non-upscaling adaptive ladder for height ${sourceHeight}p...`,
-        probe_data: probeData,
-      });
-
-      await jobQueueService.renewHeartbeat(job.id, workerId);
-
-      // NON-UPSCALING RULE: source 720p -> only [720p, 480p, 360p]
-      const targetLadder = this.resolveLadderProfiles(sourceHeight);
+      const targetLadder = videoEngine.resolveLadderProfiles(probeResult.height);
       const targetProfiles = targetLadder.map((p) => p.name);
 
-      // ----------------------------------------------------
-      // STAGE 3: PACKAGING (Apple HLS Master & Variant Manifests)
-      // ----------------------------------------------------
-      await jobQueueService.updateJobProgress(job.id, 'packaging', 60, {
-        stage_message: 'Packaging multi-profile HLS playlists (CMAF / fMP4 compliant)...',
+      await jobQueueService.updateJobProgress(job.id, 'transcoding', 35, {
+        stage_message: `Transcoding ${targetProfiles.join(', ')} with ffmpeg (non-upscaling from ${probeResult.height}p)...`,
+        probe_data: probeResult,
         target_profiles: targetProfiles,
-      });
+      }, leaseContext);
 
-      await jobQueueService.renewHeartbeat(job.id, workerId);
+      // Execute real ffmpeg encoding and HLS packaging
+      const hlsResult = await videoEngine.transcodeToHls(sourcePath, workDir, targetLadder);
 
-      // Construct Master Playlist with Apple HLS compliance
-      let masterPlaylist = '#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-INDEPENDENT-SEGMENTS\n';
-      targetLadder.forEach((p) => {
-        masterPlaylist += `#EXT-X-STREAM-INF:BANDWIDTH=${p.bandwidth},AVERAGE-BANDWIDTH=${p.avgBandwidth},RESOLUTION=${p.width}x${p.height},FRAME-RATE=30.000,CODECS="${p.codecs}"\n`;
-        masterPlaylist += `${p.name}.m3u8\n`;
-      });
-
-      // ----------------------------------------------------
-      // STAGE 4: POSTER & ANIMATED TRAILER GENERATION (Sharp WebP)
-      // ----------------------------------------------------
-      await jobQueueService.updateJobProgress(job.id, 'poster_generation', 75, {
-        stage_message: 'Rendering Smart Poster Frame and 3s Hover Preview Trailer...',
-      });
-
-      await jobQueueService.renewHeartbeat(job.id, workerId);
-
-      const title = (asset.display_name || 'Video Showcase').replace(/&/g, '&amp;');
-
-      // Poster SVG -> WebP
-      const posterSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
-        <defs>
-          <linearGradient id="pbg" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stop-color="#090D16" />
-            <stop offset="50%" stop-color="#111827" />
-            <stop offset="100%" stop-color="#1E1B4B" />
-          </linearGradient>
-          <radialGradient id="glow" cx="50%" cy="50%" r="40%">
-            <stop offset="0%" stop-color="#7C3AED" stop-opacity="0.3" />
-            <stop offset="100%" stop-color="#7C3AED" stop-opacity="0" />
-          </radialGradient>
-        </defs>
-        <rect width="1280" height="720" fill="url(#pbg)" />
-        <circle cx="640" cy="340" r="280" fill="url(#glow)" />
-        <circle cx="640" cy="340" r="56" fill="#7C3AED" fill-opacity="0.9" />
-        <polygon points="630,318 662,340 630,362" fill="#FFFFFF" />
-        <rect x="0" y="600" width="1280" height="120" fill="rgba(0,0,0,0.7)" />
-        <text x="60" y="650" fill="#F8FAFC" font-family="system-ui, sans-serif" font-size="28" font-weight="700">${title}</text>
-        <text x="60" y="685" fill="#A78BFA" font-family="system-ui, sans-serif" font-size="16" font-weight="600">HLS STREAM • ${targetProfiles.join(' | ').toUpperCase()} • ${durationSec}s</text>
-      </svg>`;
-
-      let posterBuffer: Buffer;
-      try {
-        posterBuffer = await sharp(Buffer.from(posterSvg)).webp({ quality: 85 }).toBuffer();
-      } catch {
-        posterBuffer = Buffer.from(posterSvg);
+      // Verify lease after heavy transcoding
+      const transcodeLease = await jobQueueService.renewHeartbeat(job.id, workerId, job.job_run_id || undefined);
+      if (!transcodeLease) {
+        throw new LeaseLostError(`LEASE_LOST: Job ${job.id} lease expired during transcoding`);
       }
 
-      await jobQueueService.updateJobProgress(job.id, 'preview_generation', 85, {
-        stage_message: 'Finalizing 3-second animated hover trailer loop...',
-      });
+      // ----------------------------------------------------
+      // STAGE 3: POSTER & ANIMATED TRAILER EXTRACTION
+      // ----------------------------------------------------
+      await jobQueueService.updateJobProgress(job.id, 'poster_generation', 70, {
+        stage_message: 'Extracting video poster frame at 1.0s via ffmpeg...',
+      }, leaseContext);
+
+      const posterPath = path.join(workDir, 'poster.webp');
+      const posterBuffer = await videoEngine.extractPosterFrame(sourcePath, posterPath, 1.0);
+
+      await jobQueueService.updateJobProgress(job.id, 'preview_generation', 80, {
+        stage_message: 'Generating 3s animated trailer loop from source video...',
+      }, leaseContext);
+
+      const trailerPath = path.join(workDir, 'trailer.webp');
+      const trailerBuffer = await videoEngine.generateAnimatedTrailer(
+        sourcePath,
+        trailerPath,
+        Math.min(3.0, probeResult.durationSec > 0 ? probeResult.durationSec : 3.0)
+      );
 
       // ----------------------------------------------------
-      // STAGE 5: UPLOADING OUTPUTS & VALIDATING
+      // STAGE 4: UPLOADING OUTPUTS & ARTIFACTS
       // ----------------------------------------------------
-      await jobQueueService.updateJobProgress(job.id, 'uploading_outputs', 95, {
-        stage_message: 'Persisting HLS manifest records and output metadata...',
-      });
+      await jobQueueService.updateJobProgress(job.id, 'uploading_outputs', 90, {
+        stage_message: 'Persisting HLS playlists and video segments to storage...',
+      }, leaseContext);
+
+      const storage = getStorageProvider();
+      const storagePrefix = `videos/${asset.id}/${outputVersion}`;
+
+      // 1. Upload Master Playlist
+      const masterStorageKey = `${storagePrefix}/master.m3u8`;
+      await storage.upload(
+        Buffer.from(hlsResult.masterPlaylistContent, 'utf8'),
+        masterStorageKey,
+        'application/vnd.apple.mpegurl'
+      );
+
+      // 2. Upload Poster & Trailer
+      const posterStorageKey = `${storagePrefix}/poster.webp`;
+      await storage.upload(posterBuffer, posterStorageKey, 'image/webp');
+
+      const trailerStorageKey = `${storagePrefix}/trailer.webp`;
+      await storage.upload(trailerBuffer, trailerStorageKey, 'image/webp');
+
+      // 3. Upload Variant Playlists and Segments
+      const uploadedVariants: Array<{
+        profile: string;
+        resolution: string;
+        bandwidth: number;
+        avg_bandwidth: number;
+        codecs: string;
+        url: string;
+        segment_count: number;
+      }> = [];
+
+      for (const variant of hlsResult.variants) {
+        // Upload variant playlist
+        const variantKey = `${storagePrefix}/${variant.playlistFileName}`;
+        await storage.upload(
+          Buffer.from(variant.playlistContent, 'utf8'),
+          variantKey,
+          'application/vnd.apple.mpegurl'
+        );
+
+        // Upload segments
+        for (const seg of variant.segments) {
+          const segKey = `${storagePrefix}/${variant.profile}/${seg.fileName}`;
+          const segBuffer = fs.readFileSync(seg.filePath);
+          await storage.upload(segBuffer, segKey, 'video/MP2T');
+        }
+
+        uploadedVariants.push({
+          profile: variant.profile,
+          resolution: variant.resolution,
+          bandwidth: variant.bandwidth,
+          avg_bandwidth: variant.avgBandwidth,
+          codecs: variant.codecs,
+          url: `/api/v1/delivery/video/${asset.id}/${variant.playlistFileName}`,
+          segment_count: variant.segments.length,
+        });
+      }
 
       const outputManifest = {
         output_version: outputVersion,
-        master_m3u8: masterPlaylist,
-        variants: targetLadder.map((p) => ({
-          profile: p.name,
-          resolution: `${p.width}x${p.height}`,
-          bandwidth: p.bandwidth,
-          avg_bandwidth: p.avgBandwidth,
-          codecs: p.codecs,
-          url: `/api/v1/delivery/video/${asset.id}/${p.name}.m3u8`,
-        })),
+        master_m3u8: hlsResult.masterPlaylistContent,
+        variants: uploadedVariants,
         poster_url: `/api/v1/delivery/video/${asset.id}/poster.webp`,
         trailer_url: `/api/v1/delivery/video/${asset.id}/trailer.webp`,
         target_profiles: targetProfiles,
         non_upscaling_enforced: true,
-        source_height: sourceHeight,
+        source_height: probeResult.height,
+        source_width: probeResult.width,
+        duration_ms: probeResult.durationMs,
+        video_codec: probeResult.videoCodec,
+        audio_codec: probeResult.audioCodec,
+        fps: probeResult.fps,
+        bitrate: probeResult.bitrate,
         created_at: new Date().toISOString(),
       };
 
       // ----------------------------------------------------
-      // STAGE 6: VALIDATING (HLS Stream Conformance)
+      // STAGE 5: VALIDATION
       // ----------------------------------------------------
       await jobQueueService.updateJobProgress(job.id, 'validating', 98, {
-        stage_message: 'Validating HLS manifest compliance with Apple Authoring Spec...',
-      });
+        stage_message: 'Validating HLS manifest compliance and segment availability...',
+      }, leaseContext);
 
-      if (!masterPlaylist.includes('#EXTM3U') || !masterPlaylist.includes('#EXT-X-VERSION')) {
+      if (!hlsResult.masterPlaylistContent.includes('#EXTM3U') || !hlsResult.masterPlaylistContent.includes('#EXT-X-VERSION')) {
         throw new Error('HLS_VALIDATION_FAILED: Master playlist header malformed');
       }
 
-      // Mark Job Complete with deterministic output_version
-      const completedJob = await jobQueueService.completeJob(job.id, outputManifest, outputVersion);
+      // ----------------------------------------------------
+      // STAGE 6: COMPLETION WITH FENCING
+      // ----------------------------------------------------
+      const completedJob = await jobQueueService.completeJob(
+        job.id,
+        outputManifest,
+        outputVersion,
+        leaseContext
+      );
 
       // Trigger outbound webhook notification with deterministic Event ID for deduplication
-      webhookService.dispatchEvent(asset.workspace_id, 'video.processed', {
-        asset_id: asset.id,
-        job_id: job.id,
-        event_id: `evt_video_${job.id}_${outputVersion}`,
-        output_version: outputVersion,
-        profiles: targetProfiles,
-        master_url: `/api/v1/delivery/video/${asset.id}/master.m3u8`,
-      });
+      webhookService.dispatchEvent(
+        asset.workspace_id,
+        'video.processed',
+        {
+          asset_id: asset.id,
+          job_id: job.id,
+          output_version: outputVersion,
+          profiles: targetProfiles,
+          master_url: `/api/v1/delivery/video/${asset.id}/master.m3u8`,
+        },
+        { eventId: `evt_video_${job.id}_${outputVersion}` }
+      );
 
       return completedJob;
     } catch (err: any) {
+      // Split-brain protection: if lease was lost, abort processing without modifying job/asset
+      if (err instanceof LeaseLostError || err.name === 'LeaseLostError' || (err.message && err.message.includes('LEASE_LOST'))) {
+        console.warn(`[VideoWorker] ABORTING: Lease was lost or reclaimed by another worker for job ${job.id}:`, err.message);
+        throw err;
+      }
+
       console.error(`[VideoWorker] Job ${job.id} failed:`, err);
 
       // Taxonomy Classification
@@ -247,11 +310,14 @@ export const videoWorkerService = {
       if (msg.includes('HLS_VALIDATION_FAILED')) {
         taxonomy = 'HLS_VALIDATION_FAILED';
         retryable = false;
-      } else if (msg.includes('CORRUPTED') || msg.includes('Invalid video') || msg.includes('bad header')) {
+      } else if (msg.includes('CORRUPTED') || msg.includes('Invalid video') || msg.includes('bad header') || msg.includes('INVALID_VIDEO')) {
         taxonomy = 'CORRUPTED_SOURCE';
         retryable = false;
       } else if (msg.includes('unsupported codec') || msg.includes('UNSUPPORTED_CODEC')) {
         taxonomy = 'UNSUPPORTED_CODEC';
+        retryable = false;
+      } else if (msg.includes('SOURCE_NOT_FOUND')) {
+        taxonomy = 'SOURCE_NOT_FOUND';
         retryable = false;
       } else if (msg.includes('timeout') || msg.includes('ETIMEDOUT') || msg.includes('ECONNRESET')) {
         taxonomy = 'STORAGE_TIMEOUT';
@@ -268,13 +334,23 @@ export const videoWorkerService = {
           worker_id: workerId,
           output_version: outputVersion,
           timestamp: new Date().toISOString(),
-        }
+        },
+        leaseContext
       );
+    } finally {
+      // Clean up scratch temp directory
+      try {
+        if (fs.existsSync(workDir)) {
+          fs.rmSync(workDir, { recursive: true, force: true });
+        }
+      } catch (cleanErr: any) {
+        console.warn(`[VideoWorker] Failed to clean workdir ${workDir}:`, cleanErr.message);
+      }
     }
   },
 
   /**
-   * Process next pending job from the priority queue
+   * Process next pending job from the priority queue via atomic claim
    */
   async processNextQueuedJob(workerId: string = 'worker_main'): Promise<ProcessingJob | null> {
     const job = await jobQueueService.claimNextJob(workerId);

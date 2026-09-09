@@ -6,13 +6,14 @@ import { AppError } from '@/lib/errors/app-error';
 import { ErrorCodes } from '@/lib/errors/codes';
 
 export interface AuthPrincipal {
-  type: 'api_key' | 'user' | 'anonymous_dev';
+  type: 'api_key' | 'user' | 'worker_service' | 'anonymous_dev';
   workspaceId: string;
   scopes: string[];
   apiKeyId?: string;
   serviceAccountId?: string;
   userId?: string;
   role?: UserRole;
+  workerId?: string;
 }
 
 const ROLE_DEFAULT_SCOPES: Record<UserRole, string[]> = {
@@ -32,9 +33,24 @@ export async function authenticateRequest(
   req: NextRequest,
   requiredScope?: string
 ): Promise<AuthPrincipal> {
-  // 1. Check API Key Authentication (Integration API)
-  const apiKeyHeader = req.headers.get('X-Media-Api-Key');
   const authHeader = req.headers.get('Authorization');
+
+  // 1. Check Worker Service Token Authentication (Background Daemon & Queue Workers)
+  const workerServiceToken = process.env.WORKER_SERVICE_TOKEN;
+  if (authHeader && authHeader.startsWith('Bearer sec_worker_')) {
+    const candidateToken = authHeader.replace('Bearer ', '').trim();
+    if (workerServiceToken && candidateToken === workerServiceToken) {
+      return {
+        type: 'worker_service',
+        workspaceId: req.headers.get('X-Workspace-Id') || mockWorkspace.id,
+        scopes: ['*'],
+        workerId: req.headers.get('X-Worker-Id') || 'daemon_service',
+      };
+    }
+  }
+
+  // 2. Check API Key Authentication (Integration API)
+  const apiKeyHeader = req.headers.get('X-Media-Api-Key');
 
   let rawKey: string | null = null;
   if (apiKeyHeader) {
@@ -54,7 +70,7 @@ export async function authenticateRequest(
     };
   }
 
-  // 2. Check Session Cookie Authentication (Web Dashboard)
+  // 3. Check Session Cookie Authentication (Web Dashboard)
   const sessionCookie = req.cookies.get(SESSION_COOKIE_NAME)?.value;
   const session = await verifySessionToken(sessionCookie);
 
