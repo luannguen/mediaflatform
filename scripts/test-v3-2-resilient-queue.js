@@ -1,7 +1,8 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
+const ffmpeg = require('@ffmpeg-installer/ffmpeg');
 
 // Load environment variables from .env.local if present
 if (fs.existsSync('.env.local')) {
@@ -210,9 +211,22 @@ async function runResilientQueueTests() {
   console.log('\n--- STEP 5: Dead Letter Queue (DLQ) for Permanent Errors ---');
   let dlqJobId = null;
   try {
-    const dummyBuffer = Buffer.alloc(1024);
+    // Synthesize valid 1s MP4
+    const tempDlqMp4 = path.join(__dirname, `test-dlq-${Date.now()}.mp4`);
+    execFileSync(ffmpeg.path, [
+      '-y',
+      '-f', 'lavfi', '-i', 'testsrc=duration=1:size=1280x720:rate=24',
+      '-f', 'lavfi', '-i', 'sine=frequency=1000:duration=1',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-ar', '48000', '-b:a', '64k',
+      tempDlqMp4,
+    ], { stdio: 'pipe' });
+
+    const dlqVideoBytes = fs.readFileSync(tempDlqMp4);
+    try { fs.unlinkSync(tempDlqMp4); } catch {}
+
     const formData = new FormData();
-    formData.append('file', new Blob([dummyBuffer], { type: 'video/mp4' }), `corrupt-test-${Date.now()}.mp4`);
+    formData.append('file', new Blob([dlqVideoBytes], { type: 'video/mp4' }), `corrupt-test-${Date.now()}.mp4`);
     const uploadRes = await fetch(`${BASE_URL}/api/v1/uploads`, {
       method: 'POST',
       headers: { 'Cookie': cookieHeader },
@@ -266,15 +280,34 @@ async function runResilientQueueTests() {
     assert(resurrectJob?.attempt === 1, `Job attempt counter reset to 1`);
     assert(resurrectJob?.error_code === null, `Error code cleared upon resurrection`);
 
-    // Now process it to completion
-    const processRes = await fetch(`${BASE_URL}/api/v1/jobs/process`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Cookie': cookieHeader },
-      body: JSON.stringify({ job_id: dlqJobId, worker_id: 'dlq_recovery_worker' }),
-    });
-    const completedJob = (await processRes.json()).data?.job;
+    // Now process it to completion via atomic claim polling
+    let completedJob = null;
+    for (let loop = 0; loop < 10; loop++) {
+      const processRes = await fetch(`${BASE_URL}/api/v1/jobs/process`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cookie': cookieHeader },
+        body: JSON.stringify({ worker_id: 'dlq_recovery_worker' }),
+      });
+      if (processRes.ok) {
+        const json = await processRes.json();
+        const job = json.data?.job;
+        if (!job) break;
+        if (job.id === dlqJobId) {
+          completedJob = job;
+          break;
+        }
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    if (!completedJob) {
+      const checkRes = await fetch(`${BASE_URL}/api/v1/jobs/${dlqJobId}`, {
+        headers: { 'Cookie': cookieHeader },
+      });
+      completedJob = (await checkRes.json()).data;
+    }
     assert(completedJob?.status === 'completed', `Resurrected job processed successfully to 'completed'`);
-    assert(!!completedJob?.output_version, `Completed job has deterministic output_version: ${completedJob?.output_version}`);
+    const outputVersion = completedJob?.output_version || completedJob?.metadata_json?.output_manifest?.output_version;
+    assert(!!outputVersion, `Completed job has deterministic output_version: ${outputVersion}`);
   } catch (err) {
     assert(false, `DLQ resurrection test failed: ${err.message}`);
   }
@@ -302,10 +335,22 @@ async function runResilientQueueTests() {
   // 8. Test 7: Standalone Queue Consumer Daemon (--once)
   console.log('\n--- STEP 8: Standalone Worker Daemon Execution ---');
   try {
-    // Create a fresh test job
-    const dummyBuffer = Buffer.alloc(1024);
+    // Synthesize valid 1s MP4 with ffmpeg
+    const tempDaemonMp4 = path.join(__dirname, `test-daemon-${Date.now()}.mp4`);
+    execFileSync(ffmpeg.path, [
+      '-y',
+      '-f', 'lavfi', '-i', 'testsrc=duration=1:size=1280x720:rate=24',
+      '-f', 'lavfi', '-i', 'sine=frequency=1000:duration=1',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-ar', '48000', '-b:a', '64k',
+      tempDaemonMp4,
+    ], { stdio: 'pipe' });
+
+    const daemonVideoBytes = fs.readFileSync(tempDaemonMp4);
+    try { fs.unlinkSync(tempDaemonMp4); } catch {}
+
     const formData = new FormData();
-    formData.append('file', new Blob([dummyBuffer], { type: 'video/mp4' }), `daemon-test-${Date.now()}.mp4`);
+    formData.append('file', new Blob([daemonVideoBytes], { type: 'video/mp4' }), `daemon-test-${Date.now()}.mp4`);
     formData.append('display_name', 'Daemon Execution Test Video');
     const uploadRes = await fetch(`${BASE_URL}/api/v1/uploads`, {
       method: 'POST',

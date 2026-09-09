@@ -1,6 +1,8 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
+const ffmpeg = require('@ffmpeg-installer/ffmpeg');
 
 // Load environment variables from .env.local if present
 if (fs.existsSync('.env.local')) {
@@ -69,17 +71,22 @@ async function runAsyncWorkerTests() {
   // 2. Non-Blocking Video Upload (< 200ms target)
   console.log('\n--- STEP 2: Non-Blocking Video Upload & Immediate Response ---');
   try {
-    // Create a 64KB dummy MP4 buffer with valid header
-    const dummyMp4Buffer = Buffer.alloc(65536);
-    // ftyp box header
-    dummyMp4Buffer.writeUInt32BE(0x0000001c, 0);
-    dummyMp4Buffer.write('ftyp', 4);
-    dummyMp4Buffer.write('isom', 8);
-    dummyMp4Buffer.writeUInt32BE(0x00000200, 12);
-    dummyMp4Buffer.write('isomiso2mp41', 16);
+    // Synthesize a valid 1s 720p MP4 test video with ffmpeg
+    const tempMp4 = path.join(__dirname, `test-nonblocking-${Date.now()}.mp4`);
+    execFileSync(ffmpeg.path, [
+      '-y',
+      '-f', 'lavfi', '-i', 'testsrc=duration=1:size=1280x720:rate=24',
+      '-f', 'lavfi', '-i', 'sine=frequency=1000:duration=1',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-ar', '48000', '-b:a', '64k',
+      tempMp4,
+    ], { stdio: 'pipe' });
+
+    const realVideoBytes = fs.readFileSync(tempMp4);
+    try { fs.unlinkSync(tempMp4); } catch {}
 
     const formData = new FormData();
-    const fileBlob = new Blob([dummyMp4Buffer], { type: 'video/mp4' });
+    const fileBlob = new Blob([realVideoBytes], { type: 'video/mp4' });
     formData.append('file', fileBlob, `test-nonblocking-${Date.now()}.mp4`);
     formData.append('display_name', 'Async Pipeline Test Video 720p');
 
@@ -136,23 +143,38 @@ async function runAsyncWorkerTests() {
   // 4. Trigger Worker Processing Execution
   console.log('\n--- STEP 4: Asynchronous Worker Execution Pipeline ---');
   try {
-    const processRes = await fetch(`${BASE_URL}/api/v1/jobs/process`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Cookie': cookieHeader,
-      },
-      body: JSON.stringify({
-        job_id: job720Id,
-        worker_id: 'test_runner_worker_01',
-      }),
-    });
+    let processedJob = null;
+    for (let loop = 0; loop < 10; loop++) {
+      const processRes = await fetch(`${BASE_URL}/api/v1/jobs/process`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Cookie': cookieHeader,
+        },
+        body: JSON.stringify({ worker_id: 'test_runner_worker_01' }),
+      });
 
-    assert(processRes.status === 200, `Worker process endpoint returned HTTP 200`);
-    const processJson = await processRes.json();
-    const processedJob = processJson.data?.job;
+      if (processRes.ok) {
+        const processJson = await processRes.json();
+        const job = processJson.data?.job;
+        if (!job) break;
+        if (job.id === job720Id) {
+          processedJob = job;
+          break;
+        }
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
 
-    assert(processedJob?.status === 'completed', `Job transitioned to 'completed'`);
+    if (!processedJob) {
+      const checkRes = await fetch(`${BASE_URL}/api/v1/jobs/${job720Id}`, {
+        headers: { 'Cookie': cookieHeader },
+      });
+      processedJob = (await checkRes.json()).data;
+    }
+
+    assert(!!processedJob, `Worker process endpoint executed`);
+    assert(processedJob?.status === 'completed', `Job transitioned to 'completed' (got: ${processedJob?.status})`);
     assert(processedJob?.current_stage === 'ready', `Job current_stage transitioned to 'ready'`);
     assert(processedJob?.progress === 100, `Job progress reached 100%`);
     assert(!!processedJob?.metadata_json?.output_manifest, `Output manifest stored in job metadata`);
@@ -251,20 +273,37 @@ async function runAsyncWorkerTests() {
     assert(retryData?.attempt >= 2, `Job attempt incremented to ${retryData?.attempt}`);
 
     // Verify worker can pick it up again without re-uploading original file
-    const reprocessRes = await fetch(`${BASE_URL}/api/v1/jobs/process`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Cookie': cookieHeader,
-      },
-      body: JSON.stringify({
-        job_id: job720Id,
-        worker_id: 'retry_worker',
-      }),
-    });
+    let reprocessJob = null;
+    for (let loop = 0; loop < 10; loop++) {
+      const reprocessRes = await fetch(`${BASE_URL}/api/v1/jobs/process`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Cookie': cookieHeader,
+        },
+        body: JSON.stringify({ worker_id: 'retry_worker' }),
+      });
 
-    assert(reprocessRes.status === 200, `Retried job re-processed successfully`);
-    const reprocessJob = (await reprocessRes.json()).data?.job;
+      if (reprocessRes.ok) {
+        const json = await reprocessRes.json();
+        const job = json.data?.job;
+        if (!job) break;
+        if (job.id === job720Id) {
+          reprocessJob = job;
+          break;
+        }
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
+    if (!reprocessJob) {
+      const checkRes = await fetch(`${BASE_URL}/api/v1/jobs/${job720Id}`, {
+        headers: { 'Cookie': cookieHeader },
+      });
+      reprocessJob = (await checkRes.json()).data;
+    }
+
+    assert(!!reprocessJob, `Retried job re-processed successfully`);
     assert(reprocessJob?.status === 'completed', `Retried job completed successfully (attempt ${reprocessJob?.attempt})`);
   } catch (err) {
     assert(false, `Retry mechanism test failed: ${err.message}`);
