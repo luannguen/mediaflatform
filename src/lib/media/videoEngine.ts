@@ -200,6 +200,7 @@ export const videoEngine = {
     options?:
       | {
           hasAudio?: boolean;
+          signal?: AbortSignal;
           onProgress?: (profileName: string, percent: number) => void;
         }
       | ((profileName: string, percent: number) => void)
@@ -210,10 +211,15 @@ export const videoEngine = {
 
     const onProgress = typeof options === 'function' ? options : options?.onProgress;
     const hasAudio = typeof options === 'object' && options?.hasAudio !== undefined ? options.hasAudio : true;
+    const signal = typeof options === 'object' ? options?.signal : undefined;
 
     const variants: GeneratedVariant[] = [];
 
     for (let i = 0; i < ladderProfiles.length; i++) {
+      if (signal?.aborted) {
+        throw new Error('ABORTED: Transcoding aborted by signal');
+      }
+
       const profile = ladderProfiles[i];
       const profileDir = path.join(outputDir, profile.name);
       if (!fs.existsSync(profileDir)) {
@@ -223,7 +229,7 @@ export const videoEngine = {
       const segmentPattern = path.join(profileDir, '%03d.ts');
       const playlistPath = path.join(profileDir, 'index.m3u8');
 
-      // Canonical aspect ratio preservation with black letterbox/pillarbox padding and square pixels (SAR 1:1)
+      // Canonical aspect ratio preservation with black letterbox/pillarbox padding, square pixels (SAR 1:1), and fixed 30fps
       const vf = `scale=w=${profile.width}:h=${profile.height}:force_original_aspect_ratio=decrease,pad=${profile.width}:${profile.height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1`;
       const h264Profile = profile.height >= 1080 ? 'high' : 'main';
       const h264Level = profile.height >= 1080 ? '4.1' : '3.1';
@@ -236,11 +242,12 @@ export const videoEngine = {
         ? profile.codecs
         : profile.codecs.split(',')[0]; // avc1 only if no audio stream
 
-      // Execute real ffmpeg encoding and segmentation
+      // Execute real ffmpeg encoding and segmentation with fixed 30fps matching Master manifest
       const ffmpegArgs = [
         '-y',
         '-i', sourcePath,
         '-vf', vf,
+        '-r', '30',
         '-c:v', 'libx264',
         '-profile:v', h264Profile,
         '-level:v', h264Level,
@@ -257,8 +264,11 @@ export const videoEngine = {
       ];
 
       try {
-        await execFileAsync(FFMPEG_PATH, ffmpegArgs);
+        await execFileAsync(FFMPEG_PATH, ffmpegArgs, { signal });
       } catch (err: any) {
+        if (signal?.aborted || err.name === 'AbortError') {
+          throw new Error('LEASE_LOST: Transcoding aborted because worker lease was lost');
+        }
         throw new Error(`TRANSCODING_FAILED: ffmpeg execution failed for profile ${profile.name} - ${err.message}`);
       }
 

@@ -111,9 +111,26 @@ async function runTests() {
   }
   assert(!!imageAssetId, `Test image asset ready: ${imageAssetId}`);
 
-  // If no video asset exists, create a synthetic one in database for testing
+  // Discover an existing processed 'ready' video asset first
   if (!videoAssetId) {
-    console.log('  Creating mock video asset for testing...');
+    try {
+      const res = await fetch(`${BASE_URL}/api/v1/assets?limit=50`, {
+        headers: { 'Cookie': cookieHeader },
+      });
+      const json = await res.json();
+      if (json.data && Array.isArray(json.data)) {
+        const readyVideo = json.data.find((a) => a.asset_type === 'video' && a.processing_status === 'ready');
+        if (readyVideo) {
+          videoAssetId = readyVideo.id;
+          console.log(`  Found existing ready video asset: ${videoAssetId}`);
+        }
+      }
+    } catch (e) {}
+  }
+
+  // If no ready video asset exists, create and process one
+  if (!videoAssetId) {
+    console.log('  Creating test video asset for testing...');
     try {
       const directRes = await fetch(`${BASE_URL}/api/v1/assets`, {
         method: 'POST',

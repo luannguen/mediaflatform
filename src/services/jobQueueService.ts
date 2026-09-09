@@ -430,6 +430,34 @@ export const jobQueueService = {
       return job;
     }
 
+    // Try Atomic Fenced CAS RPC to update both Job and Asset in a single Postgres transaction
+    if (leaseContext) {
+      try {
+        const { data: published, error: rpcErr } = await supabaseAdmin.rpc('publish_transcoded_asset', {
+          p_job_id: jobId,
+          p_worker_id: leaseContext.workerId,
+          p_job_run_id: leaseContext.runId || null,
+          p_output_version: version,
+          p_output_manifest: outputManifest,
+        });
+
+        if (!rpcErr && typeof published === 'boolean') {
+          if (!published) {
+            throw new LeaseLostError(`LEASE_LOST: Fencing failed for job ${jobId} upon atomic CAS publish`);
+          }
+          const { data: freshJob } = await supabaseAdmin
+            .from('processing_jobs')
+            .select()
+            .eq('id', jobId)
+            .single();
+          return freshJob as ProcessingJob;
+        }
+      } catch (err: any) {
+        if (err instanceof LeaseLostError) throw err;
+        // Fallback to fenced queries below if RPC invocation fails
+      }
+    }
+
     let query = supabaseAdmin
       .from('processing_jobs')
       .update({

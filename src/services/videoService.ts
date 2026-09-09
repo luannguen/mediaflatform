@@ -135,17 +135,8 @@ export const videoService = {
       }
     }
 
-    // Pending fallback: Standard Apple HLS VOD playlist pointing to candidate segments
-    const targetDuration = 4;
-    let fallback = '#EXTM3U\n';
-    fallback += '#EXT-X-VERSION:3\n';
-    fallback += `#EXT-X-TARGETDURATION:${targetDuration}\n`;
-    fallback += '#EXT-X-MEDIA-SEQUENCE:0\n';
-    fallback += '#EXT-X-PLAYLIST-TYPE:VOD\n\n';
-    fallback += `#EXTINF:${targetDuration.toFixed(4)},\n`;
-    fallback += `${profileName}/000.ts\n`;
-    fallback += '#EXT-X-ENDLIST\n';
-    return fallback;
+    // If neither storage artifact nor manifest contains the variant, do NOT synthesize a fake playlist.
+    return null;
   },
 
   /**

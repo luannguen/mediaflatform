@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { assetService } from '@/services/assetService';
 import { videoService } from '@/services/videoService';
-import { jobQueueService } from '@/services/jobQueueService';
 import { getStorageProvider } from '@/lib/storage/factory';
+import { authenticateRequest } from '@/lib/security/auth-guard';
 
 export async function GET(
   req: NextRequest,
@@ -11,24 +11,45 @@ export async function GET(
   try {
     const { id: assetId, file: rawFile } = await params;
     const fileSegments = Array.isArray(rawFile) ? rawFile : [rawFile];
-    const fullPath = fileSegments.join('/');
     const fileName = fileSegments[fileSegments.length - 1].toLowerCase();
 
-    const asset = await assetService.getAssetById(assetId);
+    let asset: any = null;
+    try {
+      asset = await assetService.getAssetById(assetId);
+    } catch {
+      return new NextResponse('Video asset not found', { status: 404 });
+    }
+
     if (!asset || asset.status === 'deleted' || asset.status === 'trashed') {
       return new NextResponse('Video asset not found', { status: 404 });
     }
 
+    // Enforce Private Delivery Policy: requires authentication if visibility is strictly private
+    if (asset.visibility === 'private') {
+      try {
+        await authenticateRequest(req, 'assets:read');
+      } catch {
+        return new NextResponse('Unauthorized: Private asset requires valid credentials', {
+          status: 401,
+          headers: { 'WWW-Authenticate': 'Bearer' },
+        });
+      }
+    }
+
     const baseUrl = new URL(req.url).origin;
+    const isPrivate = asset.visibility === 'private';
 
     // 1. Master HLS Playlist
     if (fileName === 'master.m3u8') {
+      if (asset.processing_status === 'failed') {
+        return new NextResponse('Video processing failed', { status: 410 });
+      }
       const playlist = await videoService.generateMasterPlaylist(assetId, baseUrl, asset);
       return new NextResponse(playlist, {
         headers: {
           'Content-Type': 'application/vnd.apple.mpegurl',
           'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'public, max-age=86400, s-maxage=86400, immutable',
+          'Cache-Control': isPrivate ? 'private, no-cache' : 'public, max-age=86400, s-maxage=86400, immutable',
         },
       });
     }
@@ -38,13 +59,19 @@ export async function GET(
       const profileName = fileName.replace('.m3u8', '');
       const variantPlaylist = await videoService.generateVariantPlaylist(assetId, profileName, baseUrl, asset);
       if (!variantPlaylist) {
-        return new NextResponse('Variant playlist not found or still processing', { status: 404 });
+        if (asset.processing_status === 'pending' || asset.processing_status === 'processing') {
+          return new NextResponse('Video transcoding is in progress', { status: 425 });
+        }
+        if (asset.processing_status === 'ready') {
+          return new NextResponse('MEDIA_ARTIFACT_MISSING: Transcoded variant playlist not found in storage', { status: 503 });
+        }
+        return new NextResponse('Variant playlist not found', { status: 404 });
       }
       return new NextResponse(variantPlaylist, {
         headers: {
           'Content-Type': 'application/vnd.apple.mpegurl',
           'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'public, max-age=86400, s-maxage=86400, immutable',
+          'Cache-Control': isPrivate ? 'private, no-cache' : 'public, max-age=86400, s-maxage=86400, immutable',
         },
       });
     }
@@ -56,7 +83,7 @@ export async function GET(
         headers: {
           'Content-Type': 'image/webp',
           'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'public, max-age=31536000, s-maxage=31536000, immutable',
+          'Cache-Control': isPrivate ? 'private, no-cache' : 'public, max-age=31536000, s-maxage=31536000, immutable',
         },
       });
     }
@@ -68,7 +95,7 @@ export async function GET(
         headers: {
           'Content-Type': 'image/webp',
           'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'public, max-age=31536000, s-maxage=31536000, immutable',
+          'Cache-Control': isPrivate ? 'private, no-cache' : 'public, max-age=31536000, s-maxage=31536000, immutable',
         },
       });
     }
@@ -78,10 +105,6 @@ export async function GET(
       const storage = getStorageProvider();
       const outputVersion = await videoService.getActiveOutputVersion(asset);
 
-      // Extract profile name from path or filename:
-      // Case A: /api/v1/delivery/video/:id/720p/000.ts -> fileSegments: ['720p', '000.ts']
-      // Case B: /api/v1/delivery/video/:id/segments/720p_000.ts -> fileSegments: ['segments', '720p_000.ts']
-      // Case C: /api/v1/delivery/video/:id/000.ts -> fileSegments: ['000.ts']
       let profile = '720p';
       let segmentFile = fileName;
 
@@ -95,25 +118,31 @@ export async function GET(
 
       if (outputVersion) {
         const exactStorageKey = `videos/${asset.id}/${outputVersion}/${profile}/${segmentFile}`;
-        const exactPublicUrl = storage.getPublicUrl(exactStorageKey);
-        return NextResponse.redirect(exactPublicUrl, {
+        let redirectUrl: string;
+        if (isPrivate) {
+          try {
+            redirectUrl = await storage.getSignedDownloadUrl(exactStorageKey, 60);
+          } catch {
+            return new NextResponse('MEDIA_ARTIFACT_MISSING: Private segment not found in storage', { status: 503 });
+          }
+        } else {
+          redirectUrl = storage.getPublicUrl(exactStorageKey);
+        }
+
+        return NextResponse.redirect(redirectUrl, {
           status: 307,
           headers: {
             'Access-Control-Allow-Origin': '*',
-            'Cache-Control': 'public, max-age=31536000, s-maxage=31536000, immutable',
+            'Cache-Control': isPrivate ? 'private, no-cache' : 'public, max-age=31536000, s-maxage=31536000, immutable',
           },
         });
       }
 
-      // Fallback if job manifest not available yet
-      if (asset.storage_url) {
-        return NextResponse.redirect(asset.storage_url, {
-          status: 307,
-          headers: {
-            'Access-Control-Allow-Origin': '*',
-            'Cache-Control': 'public, max-age=31536000, s-maxage=31536000, immutable',
-          },
-        });
+      if (asset.processing_status === 'pending' || asset.processing_status === 'processing') {
+        return new NextResponse('Video segment is still processing', { status: 425 });
+      }
+      if (asset.processing_status === 'ready') {
+        return new NextResponse('MEDIA_ARTIFACT_MISSING: Video segment not found in storage', { status: 503 });
       }
 
       return new NextResponse('Segment unavailable', { status: 404 });

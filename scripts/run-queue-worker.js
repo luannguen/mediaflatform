@@ -67,43 +67,52 @@ function handleShutdown(signal) {
 process.on('SIGINT', () => handleShutdown('SIGINT'));
 process.on('SIGTERM', () => handleShutdown('SIGTERM'));
 
-const FFMPEG_PATH = process.env.FFMPEG_PATH || (ffmpegInstaller && ffmpegInstaller.path) || 'ffmpeg';
-const FFPROBE_PATH = process.env.FFPROBE_PATH || (ffprobeInstaller && ffprobeInstaller.path) || 'ffprobe';
-
-const CANONICAL_LADDER = [
-  { name: '1080p', width: 1920, height: 1080, bandwidth: 4800000, avgBandwidth: 4500000, codecs: 'avc1.640028,mp4a.40.2' },
-  { name: '720p', width: 1280, height: 720, bandwidth: 2700000, avgBandwidth: 2500000, codecs: 'avc1.4d401f,mp4a.40.2' },
-  { name: '480p', width: 854, height: 480, bandwidth: 1350000, avgBandwidth: 1200000, codecs: 'avc1.4d401e,mp4a.40.2' },
-  { name: '360p', width: 640, height: 360, bandwidth: 700000, avgBandwidth: 600000, codecs: 'avc1.4d401e,mp4a.40.2' },
-];
+const { mediaWorkerCore, LeaseLostError, CANONICAL_LADDER } = require('../src/lib/media/workerCore');
 
 /**
- * Direct worker execution without HTTP overhead
+ * Direct worker execution without HTTP overhead using unified MediaWorkerCore
  */
 async function processJobDirect(supabase, job) {
   const runId = job.job_run_id || `run_${Date.now().toString(36)}`;
-  const leaseContext = { workerId, runId };
   const outputVersion = `v${job.attempt || 1}_${runId.slice(-8)}`;
   const workDir = path.join(process.cwd(), 'scratch', 'transcode', `${job.id}_${Date.now()}`);
   const sourcePath = path.join(workDir, 'source.mp4');
   const bucket = process.env.SUPABASE_STORAGE_BUCKET || 'media-assets';
 
+  const abortController = new AbortController();
   let heartbeatTimer = null;
 
   try {
     fs.mkdirSync(workDir, { recursive: true });
 
-    // Start background heartbeat every 15 seconds
+    // Initial lease check
+    const { data: initialOk, error: initErr } = await supabase.rpc('renew_job_heartbeat', {
+      p_job_id: job.id,
+      p_worker_id: workerId,
+      p_lease_seconds: 300,
+      p_job_run_id: runId,
+    });
+    if (initErr || !initialOk) {
+      abortController.abort();
+      throw new LeaseLostError(`LEASE_LOST: Initial heartbeat failed or lease lost for job ${job.id}`);
+    }
+
+    // Start background heartbeat every 15 seconds with abort on lost lease
     heartbeatTimer = setInterval(async () => {
       try {
-        await supabase.rpc('renew_job_heartbeat', {
+        const { data: renewed, error: hbErr } = await supabase.rpc('renew_job_heartbeat', {
           p_job_id: job.id,
           p_worker_id: workerId,
           p_lease_seconds: 300,
           p_job_run_id: runId,
         });
+        if (hbErr || !renewed) {
+          console.warn(`[QueueDaemon] Heartbeat lease lost for job ${job.id}, aborting FFmpeg...`);
+          abortController.abort();
+        }
       } catch (hbErr) {
-        console.warn(`[QueueDaemon] Heartbeat warning for job ${job.id}:`, hbErr.message);
+        console.warn(`[QueueDaemon] Heartbeat exception for job ${job.id}:`, hbErr.message);
+        abortController.abort();
       }
     }, 15000);
 
@@ -118,219 +127,132 @@ async function processJobDirect(supabase, job) {
       throw new Error(`SOURCE_NOT_FOUND: Asset ${job.asset_id} not found in database`);
     }
 
-    // 2. Stage Source Video
+    // 2. Stage Source Video via WorkerCore
     console.log(`[QueueDaemon] Staging video for asset ${asset.id}...`);
-    if (asset.storage_key && fs.existsSync(asset.storage_key)) {
-      fs.copyFileSync(asset.storage_key, sourcePath);
-    } else if (asset.storage_key) {
-      const { data: fileData, error: dlErr } = await supabase.storage.from(bucket).download(asset.storage_key);
-      if (dlErr || !fileData) {
-        // Fallback to local storage scratch cache if available
-        const localCache = path.join(process.cwd(), 'scratch', 'storage', bucket, asset.storage_key);
-        if (fs.existsSync(localCache)) {
-          fs.copyFileSync(localCache, sourcePath);
-        } else {
-          throw new Error(`SOURCE_NOT_FOUND: Could not download storage key ${asset.storage_key}: ${dlErr?.message}`);
-        }
-      } else {
-        const buf = Buffer.from(await fileData.arrayBuffer());
-        fs.writeFileSync(sourcePath, buf);
-      }
-    } else {
-      throw new Error(`SOURCE_NOT_FOUND: No storage_key for asset ${asset.id}`);
-    }
-
-    // 3. Probe Video
-    console.log(`[QueueDaemon] Probing container with ffprobe...`);
-    const probeArgs = [
-      '-v', 'error',
-      '-show_entries', 'stream=width,height,codec_name,codec_type,r_frame_rate,duration',
-      '-show_entries', 'format=duration,bit_rate,format_name',
-      '-of', 'json',
-      sourcePath,
-    ];
-    const probeRes = await execFileAsync(FFPROBE_PATH, probeArgs);
-    const probeJson = JSON.parse(probeRes.stdout);
-    const vStream = (probeJson.streams || []).find((s) => s.codec_type === 'video');
-    const aStream = (probeJson.streams || []).find((s) => s.codec_type === 'audio');
-    if (!vStream) throw new Error('INVALID_VIDEO: No video stream found in container');
-
-    const sourceHeight = vStream.height || 720;
-    const sourceWidth = vStream.width || 1280;
-    const hasAudio = !!aStream;
-
-    // 4. Resolve Non-Upscaling Ladder
-    const ladder = CANONICAL_LADDER.filter((p) => p.height <= sourceHeight);
-    const targetLadder = ladder.length > 0 ? ladder : [CANONICAL_LADDER[CANONICAL_LADDER.length - 1]];
-    const targetProfiles = targetLadder.map((p) => p.name);
-
-    console.log(`[QueueDaemon] Transcoding ladder: ${targetProfiles.join(', ')} (source: ${sourceWidth}x${sourceHeight})...`);
-    await supabase.from('processing_jobs').update({
-      current_stage: 'transcoding',
-      progress: 35,
-      updated_at: new Date().toISOString(),
-    }).eq('id', job.id);
-
-    // 5. Transcode HLS Profiles via FFmpeg
-    const variants = [];
-    for (const profile of targetLadder) {
-      const profileDir = path.join(workDir, profile.name);
-      fs.mkdirSync(profileDir, { recursive: true });
-      const segmentPattern = path.join(profileDir, '%03d.ts');
-      const playlistPath = path.join(profileDir, 'index.m3u8');
-
-      const vf = `scale=w=${profile.width}:h=${profile.height}:force_original_aspect_ratio=decrease,pad=${profile.width}:${profile.height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1`;
-      const h264Profile = profile.height >= 1080 ? 'high' : 'main';
-      const h264Level = profile.height >= 1080 ? '4.1' : '3.1';
-      const audioArgs = hasAudio ? ['-c:a', 'aac', '-ar', '48000', '-b:a', '128k'] : ['-an'];
-      const effectiveCodecs = hasAudio ? profile.codecs : profile.codecs.split(',')[0];
-
-      await execFileAsync(FFMPEG_PATH, [
-        '-y', '-i', sourcePath,
-        '-vf', vf,
-        '-c:v', 'libx264', '-profile:v', h264Profile, '-level:v', h264Level,
-        '-preset', 'ultrafast', '-crf', '23',
-        '-maxrate', `${profile.bandwidth}`, '-bufsize', `${profile.bandwidth * 2}`,
-        ...audioArgs,
-        '-f', 'hls', '-hls_time', '4', '-hls_playlist_type', 'vod',
-        '-hls_segment_filename', segmentPattern,
-        playlistPath,
-      ]);
-
-      const rawPlaylist = fs.readFileSync(playlistPath, 'utf8');
-      const segmentFiles = fs.readdirSync(profileDir).filter((f) => f.endsWith('.ts')).sort();
-
-      variants.push({
-        profile: profile.name,
-        resolution: `${profile.width}x${profile.height}`,
-        bandwidth: profile.bandwidth,
-        avgBandwidth: profile.avgBandwidth,
-        codecs: effectiveCodecs,
-        playlistFileName: `${profile.name}.m3u8`,
-        playlistContent: rawPlaylist,
-        segments: segmentFiles.map((f) => ({ fileName: f, filePath: path.join(profileDir, f) })),
-      });
-    }
-
-    // 6. Master Playlist
-    let masterPlaylist = '#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-INDEPENDENT-SEGMENTS\n\n';
-    for (const v of variants) {
-      masterPlaylist += `#EXT-X-STREAM-INF:BANDWIDTH=${v.bandwidth},AVERAGE-BANDWIDTH=${v.avgBandwidth},RESOLUTION=${v.resolution},FRAME-RATE=30.000,CODECS="${v.codecs}",NAME="${v.profile}"\n`;
-      masterPlaylist += `${v.profile}.m3u8\n\n`;
-    }
-
-    // 7. Poster & Trailer Generation
-    console.log(`[QueueDaemon] Extracting poster and animated trailer...`);
-    const posterPath = path.join(workDir, 'poster.webp');
-    await execFileAsync(FFMPEG_PATH, [
-      '-y', '-ss', '00:00:01', '-i', sourcePath, '-vframes', '1', '-vf', 'scale=1280:-1',
-      posterPath,
-    ]);
-
-    const trailerPath = path.join(workDir, 'trailer.webp');
-    await execFileAsync(FFMPEG_PATH, [
-      '-y', '-ss', '00:00:00', '-t', '3.00', '-i', sourcePath,
-      '-vf', 'fps=10,scale=480:-1:flags=lanczos', '-loop', '0',
-      trailerPath,
-    ]);
-
-    // 8. Upload Artifacts to Supabase Storage
-    console.log(`[QueueDaemon] Uploading HLS artifacts to storage (version: ${outputVersion})...`);
-    const prefix = `videos/${asset.id}/${outputVersion}`;
-
-    // Upload master playlist
-    await supabase.storage.from(bucket).upload(`${prefix}/master.m3u8`, Buffer.from(masterPlaylist, 'utf8'), {
-      contentType: 'application/vnd.apple.mpegurl',
-      upsert: true,
+    await mediaWorkerCore.stageSourceVideo(asset, sourcePath, async (key) => {
+      const { data, error } = await supabase.storage.from(bucket).download(key);
+      if (!error && data) return Buffer.from(await data.arrayBuffer());
+      return null;
     });
 
-    // Upload poster & trailer
-    if (fs.existsSync(posterPath)) {
-      await supabase.storage.from(bucket).upload(`${prefix}/poster.webp`, fs.readFileSync(posterPath), {
-        contentType: 'image/webp',
-        upsert: true,
-      });
-    }
-    if (fs.existsSync(trailerPath)) {
-      await supabase.storage.from(bucket).upload(`${prefix}/trailer.webp`, fs.readFileSync(trailerPath), {
-        contentType: 'image/webp',
-        upsert: true,
-      });
-    }
-
-    // Upload variant playlists & segments
-    for (const variant of variants) {
-      await supabase.storage.from(bucket).upload(`${prefix}/${variant.playlistFileName}`, Buffer.from(variant.playlistContent, 'utf8'), {
-        contentType: 'application/vnd.apple.mpegurl',
-        upsert: true,
-      });
-
-      for (const seg of variant.segments) {
-        await supabase.storage.from(bucket).upload(`${prefix}/${variant.profile}/${seg.fileName}`, fs.readFileSync(seg.filePath), {
-          contentType: 'video/MP2T',
+    // 3. Execute Unified Pipeline via WorkerCore
+    console.log(`[QueueDaemon] Executing pipeline for job ${job.id} (version: ${outputVersion})...`);
+    const outputManifest = await mediaWorkerCore.executePipeline({
+      jobId: job.id,
+      workerId,
+      runId,
+      asset,
+      outputVersion,
+      workDir,
+      bucket,
+      abortController,
+      storageUploader: async (data, key, mimeType) => {
+        const { error } = await supabase.storage.from(bucket).upload(key, data, {
+          contentType: mimeType,
           upsert: true,
         });
-      }
-    }
-
-    const outputManifest = {
-      output_version: outputVersion,
-      master_m3u8: masterPlaylist,
-      variants: variants.map((v) => ({
-        profile: v.profile,
-        resolution: v.resolution,
-        bandwidth: v.bandwidth,
-        avg_bandwidth: v.avgBandwidth,
-        codecs: v.codecs,
-        url: `/api/v1/delivery/video/${asset.id}/${v.playlistFileName}`,
-        segment_count: v.segments.length,
-      })),
-      poster_url: `/api/v1/delivery/video/${asset.id}/poster.webp`,
-      trailer_url: `/api/v1/delivery/video/${asset.id}/trailer.webp`,
-      target_profiles: targetProfiles,
-      source_height: sourceHeight,
-      source_width: sourceWidth,
-      created_at: new Date().toISOString(),
-    };
-
-    // 9. Complete Job & Update Asset
-    const now = new Date().toISOString();
-    await supabase.from('processing_jobs').update({
-      status: 'completed',
-      current_stage: 'ready',
-      progress: 100,
-      output_version: outputVersion,
-      completed_at: now,
-      heartbeat_at: now,
-      lease_expires_at: null,
-      updated_at: now,
-      metadata_json: { output_manifest: outputManifest },
-    }).eq('id', job.id).eq('status', 'processing').eq('locked_by', workerId);
-
-    const mergedMetadata = {
-      ...(asset.metadata_json || {}),
-      hls: outputManifest,
-      active_output_version: outputVersion,
-    };
-
-    await supabase.from('assets').update({
-      processing_status: 'ready',
-      metadata_json: mergedMetadata,
-      updated_at: now,
-    }).eq('id', asset.id);
+        if (error) throw error;
+      },
+      heartbeatRenewer: async () => {
+        const { data: renewed, error } = await supabase.rpc('renew_job_heartbeat', {
+          p_job_id: job.id,
+          p_worker_id: workerId,
+          p_lease_seconds: 300,
+          p_job_run_id: runId,
+        });
+        if (error || !renewed) {
+          abortController.abort();
+          return false;
+        }
+        return true;
+      },
+      fencedPublisher: async (manifest) => {
+        const { data: published, error: pubErr } = await supabase.rpc('publish_transcoded_asset', {
+          p_job_id: job.id,
+          p_worker_id: workerId,
+          p_job_run_id: runId,
+          p_output_version: outputVersion,
+          p_output_manifest: manifest,
+        });
+        if (!pubErr && typeof published === 'boolean') {
+          return published;
+        }
+        return false;
+      },
+      progressUpdater: async (stage, percent, meta) => {
+        const now = new Date().toISOString();
+        await supabase
+          .from('processing_jobs')
+          .update({
+            current_stage: stage,
+            progress: percent,
+            heartbeat_at: now,
+            updated_at: now,
+          })
+          .eq('id', job.id)
+          .eq('status', 'processing')
+          .eq('locked_by', workerId)
+          .gt('lease_expires_at', now);
+      },
+    });
 
     console.log(`[QueueDaemon] 🚀 Successfully finished direct transcode for job ${job.id} (${outputVersion})!`);
     console.log(`[QueueDaemon] ✅ Successfully processed job ${job.id} (Stage: ready, Output: ${outputVersion})`);
     return true;
   } catch (err) {
+    if (err instanceof LeaseLostError || err.name === 'LeaseLostError' || (err.message && err.message.includes('LEASE_LOST'))) {
+      console.warn(`[QueueDaemon] Split-brain protection: Lease was lost or reclaimed for job ${job.id}. Aborting without mutating job.`);
+      return false;
+    }
+
     console.error(`[QueueDaemon] Direct transcode error for job ${job.id}:`, err.message);
+
+    const { taxonomy, message, isRetryable } = mediaWorkerCore.classifyError(err);
     const now = new Date().toISOString();
-    await supabase.from('processing_jobs').update({
-      status: 'dead_letter',
-      current_stage: 'failed',
-      error_message: err.message,
-      updated_at: now,
-    }).eq('id', job.id);
+    const currentAttempt = job.attempt || 1;
+    const maxAttempts = job.max_attempts || 3;
+
+    if (isRetryable && currentAttempt < maxAttempts) {
+      const nextRunAt = mediaWorkerCore.calculateNextAvailableAt(currentAttempt);
+      console.log(`[QueueDaemon] Scheduling retry ${currentAttempt + 1}/${maxAttempts} for job ${job.id} at ${nextRunAt} (Error: ${taxonomy})`);
+
+      await supabase
+        .from('processing_jobs')
+        .update({
+          status: 'queued',
+          current_stage: 'queued',
+          attempt: currentAttempt + 1,
+          next_run_at: nextRunAt,
+          locked_by: null,
+          lease_expires_at: null,
+          error_message: `[${taxonomy}] ${message}`,
+          updated_at: now,
+        })
+        .eq('id', job.id);
+    } else {
+      console.error(`[QueueDaemon] Routing job ${job.id} to Dead Letter Queue (DLQ). Permanent/Max-retries reached. (Error: ${taxonomy})`);
+
+      await supabase
+        .from('processing_jobs')
+        .update({
+          status: 'dead_letter',
+          current_stage: 'failed',
+          locked_by: null,
+          lease_expires_at: null,
+          error_message: `[${taxonomy}] ${message}`,
+          updated_at: now,
+        })
+        .eq('id', job.id);
+
+      await supabase
+        .from('assets')
+        .update({
+          processing_status: 'failed',
+          updated_at: now,
+        })
+        .eq('id', job.asset_id);
+    }
+
     return false;
   } finally {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
