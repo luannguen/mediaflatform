@@ -2,6 +2,7 @@ import React from 'react';
 import type { Metadata } from 'next';
 import { Navbar } from './components/Navbar';
 import { HeroSection } from './components/HeroSection';
+import { VideoStudioSection } from './components/VideoStudioSection';
 import { LiveGallerySection } from './components/LiveGallerySection';
 import { TransformationLab } from './components/TransformationLab';
 import { PickerDemoSection } from './components/PickerDemoSection';
@@ -21,6 +22,7 @@ export default function LandingTestPage() {
       <Navbar />
       <main>
         <HeroSection />
+        <VideoStudioSection />
         <LiveGallerySection />
         <TransformationLab />
         <PickerDemoSection />

@@ -1,9 +1,10 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
-import { Database, Image as ImageIcon, Video, FileText, Search, Copy, Check, ExternalLink, RefreshCw, Eye, Sparkles } from 'lucide-react';
+import React, { useEffect, useState, useRef } from 'react';
+import { Database, Image as ImageIcon, Video, FileText, Search, Copy, Check, ExternalLink, RefreshCw, Eye, Sparkles, Trash2, ShieldAlert, Film } from 'lucide-react';
 import { DEMO_CREDENTIALS } from './HeroSection';
 import { toast } from 'sonner';
+import Hls from 'hls.js';
 
 interface AssetData {
   id: string;
@@ -26,6 +27,68 @@ interface AssetData {
   created_at: string;
 }
 
+function HlsModalPreview({ assetId, fallbackUrl }: { assetId: string; fallbackUrl?: string | null }) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const hlsRef = useRef<Hls | null>(null);
+  const [levelInfo, setLevelInfo] = useState<string>('HLS Connecting...');
+  const [isError, setIsError] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (!videoRef.current) return;
+    const masterUrl = `/api/v1/delivery/video/${assetId}/master.m3u8`;
+
+    if (Hls.isSupported()) {
+      const hls = new Hls({ enableWorker: true, lowLatencyMode: true });
+      hlsRef.current = hls;
+      hls.loadSource(masterUrl);
+      hls.attachMedia(videoRef.current);
+
+      hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
+        setLevelInfo(`HLS Master (${data.levels.length} renditions, 30fps)`);
+      });
+
+      hls.on(Hls.Events.LEVEL_SWITCHED, (_, data) => {
+        const lvl = hls.levels[data.level];
+        if (lvl) {
+          setLevelInfo(`${lvl.height}p (${(lvl.bitrate / 1000).toFixed(0)} kbps)`);
+        }
+      });
+
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        if (data.fatal) {
+          setIsError(true);
+          hls.destroy();
+        }
+      });
+
+      return () => {
+        hls.destroy();
+      };
+    } else if (videoRef.current.canPlayType('application/vnd.apple.mpegurl')) {
+      videoRef.current.src = masterUrl;
+      setLevelInfo('Native HLS (Apple/Safari)');
+    } else {
+      setIsError(true);
+    }
+  }, [assetId]);
+
+  return (
+    <div className="relative w-full bg-black flex items-center justify-center">
+      <video
+        ref={videoRef}
+        controls
+        playsInline
+        poster={`/api/v1/delivery/video/${assetId}/poster.webp`}
+        src={isError && fallbackUrl ? fallbackUrl : undefined}
+        className="w-full max-h-72 object-contain"
+      />
+      <div className="absolute top-2 right-2 px-2.5 py-1 rounded-lg bg-slate-950/80 backdrop-blur-md text-[10px] font-mono text-purple-300 border border-purple-800 pointer-events-none">
+        {isError ? 'Direct MP4 Fallback' : levelInfo}
+      </div>
+    </div>
+  );
+}
+
 export function LiveGallerySection() {
   const [assets, setAssets] = useState<AssetData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -34,6 +97,8 @@ export function LiveGallerySection() {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedAsset, setSelectedAsset] = useState<AssetData | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [hoveredVideoId, setHoveredVideoId] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const fetchAssets = async () => {
     setLoading(true);
@@ -208,6 +273,8 @@ export function LiveGallerySection() {
                 <div
                   key={asset.id}
                   onClick={() => setSelectedAsset(asset)}
+                  onMouseEnter={() => asset.asset_type === 'video' && setHoveredVideoId(asset.id)}
+                  onMouseLeave={() => asset.asset_type === 'video' && setHoveredVideoId(null)}
                   className="group bg-slate-900/60 hover:bg-slate-900 border border-slate-800/80 hover:border-sky-500/40 rounded-2xl overflow-hidden shadow-lg transition-all duration-300 flex flex-col cursor-pointer hover:scale-[1.02] hover:shadow-sky-500/10"
                 >
                   {/* Thumbnail Container */}
@@ -222,11 +289,29 @@ export function LiveGallerySection() {
                     )}
 
                     {isVideo && (
-                      <div className="flex flex-col items-center gap-2 text-purple-400">
-                        <div className="w-12 h-12 rounded-full bg-purple-500/20 flex items-center justify-center border border-purple-500/30">
-                          <Video className="w-6 h-6" />
+                      <div className="relative w-full h-full flex items-center justify-center bg-slate-950">
+                        <img
+                          src={
+                            hoveredVideoId === asset.id
+                              ? `/api/v1/delivery/video/${asset.id}/trailer.webp`
+                              : `/api/v1/delivery/video/${asset.id}/poster.webp`
+                          }
+                          alt={asset.display_name}
+                          loading="lazy"
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                          onError={(e) => {
+                            // Fallback if poster not yet generated
+                            (e.target as HTMLElement).style.display = 'none';
+                          }}
+                        />
+                        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-purple-400 pointer-events-none">
+                          <div className="w-12 h-12 rounded-full bg-purple-500/20 flex items-center justify-center border border-purple-500/30 shadow-md">
+                            <Video className="w-6 h-6" />
+                          </div>
+                          <span className="text-[11px] font-mono text-slate-400">
+                            {hoveredVideoId === asset.id ? 'Trailer WebP Loop' : 'HLS 30fps Stream'}
+                          </span>
                         </div>
-                        <span className="text-[11px] font-mono text-slate-400">4K Video Stream</span>
                       </div>
                     )}
 
@@ -351,8 +436,11 @@ export function LiveGallerySection() {
                     className="max-h-72 w-full object-contain"
                   />
                 )}
-                {selectedAsset.asset_type === 'video' && selectedAsset.storage_url && (
-                  <video src={selectedAsset.storage_url} controls className="w-full max-h-72" />
+                {selectedAsset.asset_type === 'video' && (
+                  <HlsModalPreview
+                    assetId={selectedAsset.id}
+                    fallbackUrl={selectedAsset.storage_url}
+                  />
                 )}
                 {selectedAsset.asset_type === 'document' && (
                   <div className="p-8 text-center text-amber-400">
@@ -391,27 +479,108 @@ export function LiveGallerySection() {
                 </div>
               </div>
 
-              {/* CDN Delivery URL */}
-              <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 text-xs font-mono mb-6">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-slate-500">DYNAMIC CDN ENDPOINT:</span>
-                  <button
-                    onClick={(e) => copyDeliveryUrl(selectedAsset, e)}
-                    className="text-sky-400 hover:text-sky-300 flex items-center gap-1 cursor-pointer"
-                  >
-                    <Copy className="w-3 h-3" />
-                    <span>Copy URL</span>
-                  </button>
+              {/* Delivery URLs */}
+              {selectedAsset.asset_type === 'video' ? (
+                <div className="space-y-2 mb-6 text-xs font-mono">
+                  <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800 flex items-center justify-between">
+                    <div className="truncate mr-2">
+                      <span className="text-slate-500 text-[10px] block">HLS MASTER PLAYLIST:</span>
+                      <span className="text-sky-400 truncate block">
+                        /api/v1/delivery/video/{selectedAsset.id}/master.m3u8
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(`${window.location.origin}/api/v1/delivery/video/${selectedAsset.id}/master.m3u8`);
+                        toast.success('Đã chép Master M3U8 URL!');
+                      }}
+                      className="p-1.5 rounded-lg bg-slate-900 text-sky-400 hover:text-white shrink-0 cursor-pointer min-h-[36px] min-w-[36px] flex items-center justify-center"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800 flex items-center justify-between">
+                      <div className="truncate mr-2">
+                        <span className="text-slate-500 text-[10px] block">POSTER WEBP:</span>
+                        <span className="text-purple-400 truncate block">poster.webp</span>
+                      </div>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(`${window.location.origin}/api/v1/delivery/video/${selectedAsset.id}/poster.webp`);
+                          toast.success('Đã chép Poster WebP URL!');
+                        }}
+                        className="p-1.5 rounded-lg bg-slate-900 text-purple-400 hover:text-white shrink-0 cursor-pointer min-h-[36px] min-w-[36px] flex items-center justify-center"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800 flex items-center justify-between">
+                      <div className="truncate mr-2">
+                        <span className="text-slate-500 text-[10px] block">TRAILER 3S WEBP:</span>
+                        <span className="text-emerald-400 truncate block">trailer.webp</span>
+                      </div>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(`${window.location.origin}/api/v1/delivery/video/${selectedAsset.id}/trailer.webp`);
+                          toast.success('Đã chép Trailer WebP URL!');
+                        }}
+                        className="p-1.5 rounded-lg bg-slate-900 text-emerald-400 hover:text-white shrink-0 cursor-pointer min-h-[36px] min-w-[36px] flex items-center justify-center"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
                 </div>
-                <div className="text-emerald-400 select-all break-all">
-                  {typeof window !== 'undefined' ? `${window.location.origin}/api/v1/delivery/${selectedAsset.id}?w=800&format=webp&q=85` : ''}
+              ) : (
+                <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 text-xs font-mono mb-6">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-slate-500">DYNAMIC CDN ENDPOINT:</span>
+                    <button
+                      onClick={(e) => copyDeliveryUrl(selectedAsset, e)}
+                      className="text-sky-400 hover:text-sky-300 flex items-center gap-1 cursor-pointer min-h-[36px]"
+                    >
+                      <Copy className="w-3 h-3" />
+                      <span>Copy URL</span>
+                    </button>
+                  </div>
+                  <div className="text-emerald-400 select-all break-all">
+                    {typeof window !== 'undefined' ? `${window.location.origin}/api/v1/delivery/${selectedAsset.id}?w=800&format=webp&q=85` : ''}
+                  </div>
                 </div>
-              </div>
+              )}
 
-              <div className="flex justify-end">
+              {/* Bottom Action Footer */}
+              <div className="flex items-center justify-between pt-2 border-t border-slate-800">
+                <button
+                  onClick={async () => {
+                    if (isDeleting) return;
+                    setIsDeleting(true);
+                    try {
+                      const res = await fetch(`/api/v1/assets/${selectedAsset.id}?action=purge&force=true`, {
+                        method: 'DELETE',
+                        headers: { 'X-Media-Api-Key': DEMO_CREDENTIALS.rawKey },
+                      });
+                      if (!res.ok) throw new Error(`Lỗi HTTP ${res.status}`);
+                      toast.success(`Đã xóa sạch asset "${selectedAsset.display_name}" khỏi hệ thống!`);
+                      setSelectedAsset(null);
+                      await fetchAssets();
+                    } catch (err: any) {
+                      toast.error(`Xóa thất bại: ${err.message}`);
+                    } finally {
+                      setIsDeleting(false);
+                    }
+                  }}
+                  disabled={isDeleting}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-red-400 text-xs font-semibold cursor-pointer min-h-[44px] disabled:opacity-50"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>{isDeleting ? 'Đang xóa...' : 'Xóa An Toàn (Purge)'}</span>
+                </button>
+
                 <button
                   onClick={() => setSelectedAsset(null)}
-                  className="px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold cursor-pointer"
+                  className="px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold cursor-pointer min-h-[44px]"
                 >
                   Đóng
                 </button>

@@ -2,7 +2,7 @@
 
 import React from 'react';
 import Link from 'next/link';
-import { Layers, Sparkles, Code2, BookOpen, ExternalLink, ArrowRight } from 'lucide-react';
+import { Layers, Sparkles, Code2, BookOpen, ExternalLink, ArrowRight, Film } from 'lucide-react';
 
 export function Navbar() {
   return (
@@ -27,6 +27,10 @@ export function Navbar() {
 
         {/* Navigation Links */}
         <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-300">
+          <a href="#video-studio" className="flex items-center gap-1.5 text-purple-300 hover:text-purple-200 font-semibold transition-colors">
+            <Film className="w-4 h-4 text-purple-400" />
+            <span>Video Studio HLS</span>
+          </a>
           <a href="#gallery" className="hover:text-sky-400 transition-colors">
             Live Gallery
           </a>
