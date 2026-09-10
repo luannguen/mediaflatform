@@ -2,7 +2,7 @@
 
 > Enterprise Headless Digital Asset Management (DAM) & Distributed Media Processing Engine.
 
-[![Version](https://img.shields.io/badge/version-v3.8.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v3.8.2-blue.svg)](CHANGELOG.md)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-3178C6.svg)](https://www.typescriptlang.org/)
 [![Next.js](https://img.shields.io/badge/Next.js-15-black.svg)](https://nextjs.org/)
 [![Supabase](https://img.shields.io/badge/Supabase-PostgreSQL%2016-3ECF8E.svg)](https://supabase.com/)

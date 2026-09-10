@@ -8,8 +8,13 @@ export interface RateLimitResult {
   remaining: number;
   resetSeconds: number;
   retryAfterSeconds?: number;
+  enforcement?: 'authoritative' | 'degraded';
+  error?: string;
 }
 
+/**
+ * Route Class Quotas for Windowed Token Bucket
+ */
 const ROUTE_CLASS_LIMITS: Record<RouteClass, number> = {
   read: 120,
   write: 60,
@@ -21,7 +26,22 @@ const ROUTE_CLASS_LIMITS: Record<RouteClass, number> = {
 
 const WINDOW_SECONDS = 60;
 
-// In-memory fallback bucket store for testing or offline environments
+/**
+ * Central Rate Limit Failure Policy when distributed PostgreSQL limiter is unavailable.
+ * In production:
+ * - 'read': fail_open (allows read traffic with degraded telemetry)
+ * - 'write', 'upload', 'expensive_transform', 'admin': fail_closed (preserves backend protection)
+ */
+export const RATE_LIMIT_FAILURE_POLICY: Record<RouteClass, 'fail_open' | 'fail_closed'> = {
+  read: 'fail_open',
+  write: 'fail_closed',
+  upload: 'fail_closed',
+  expensive_transform: 'fail_closed',
+  admin: 'fail_closed',
+  default: 'fail_closed',
+};
+
+// In-memory fallback bucket store for testing or offline environments only
 const memoryBuckets = new Map<string, { tokens: number; resetAt: number }>();
 
 export const rateLimiter = {
@@ -61,8 +81,8 @@ export const rateLimiter = {
   },
 
   /**
-   * Check and atomically consume rate limit for a caller identifier (API Key ID, IP, or Workspace ID)
-   * Uses PostgreSQL row-locked RPC consume_rate_limit_token for distributed concurrency safety.
+   * Check and atomically consume rate limit for a caller identifier (API Key ID, IP, or Workspace ID).
+   * Uses Windowed Token Bucket algorithm synchronized via PostgreSQL RPC consume_rate_limit_token.
    */
   async checkRateLimit(
     identifier: string,
@@ -73,7 +93,7 @@ export const rateLimiter = {
     const now = Date.now();
     const windowMs = WINDOW_SECONDS * 1000;
 
-    // Fast atomic in-memory check for offline/testing mode
+    // Fast atomic in-memory check for offline/testing mode without Supabase
     if (!isSupabaseAdminConfigured()) {
       let bucket = memoryBuckets.get(bucketKey);
       if (!bucket || now >= bucket.resetAt) {
@@ -84,6 +104,7 @@ export const rateLimiter = {
           limit,
           remaining: bucket.tokens,
           resetSeconds: Math.ceil(windowMs / 1000),
+          enforcement: 'authoritative',
         };
       }
 
@@ -95,6 +116,7 @@ export const rateLimiter = {
           limit,
           remaining: bucket.tokens,
           resetSeconds,
+          enforcement: 'authoritative',
         };
       }
 
@@ -105,6 +127,7 @@ export const rateLimiter = {
         remaining: 0,
         resetSeconds: retryAfter,
         retryAfterSeconds: retryAfter,
+        enforcement: 'authoritative',
       };
     }
 
@@ -128,6 +151,7 @@ export const rateLimiter = {
           remaining: Number(data.remaining) || 0,
           resetSeconds: Number(data.reset_seconds) || WINDOW_SECONDS,
           retryAfterSeconds: data.retry_after_seconds ? Number(data.retry_after_seconds) : undefined,
+          enforcement: 'authoritative',
         };
       } catch (err: any) {
         lastError = err;
@@ -139,8 +163,11 @@ export const rateLimiter = {
       }
     }
 
-    console.warn('[RateLimiter] Database RPC error, falling back to memory bucket:', lastError?.message);
-    // Fallback to in-memory bucket to prevent complete lockout while remaining resilient
+    console.warn('[RateLimiter] Distributed PostgreSQL RPC failure:', lastError?.message);
+
+    // Emergency local fallback: only permitted if explicitly opted in via env
+    const allowLocalFallback = process.env.ALLOW_LOCAL_RATE_LIMIT_FALLBACK === 'true';
+    if (allowLocalFallback) {
       let bucket = memoryBuckets.get(bucketKey);
       if (!bucket || now >= bucket.resetAt) {
         bucket = { tokens: limit - 1, resetAt: now + windowMs };
@@ -150,6 +177,7 @@ export const rateLimiter = {
           limit,
           remaining: bucket.tokens,
           resetSeconds: Math.ceil(windowMs / 1000),
+          enforcement: 'degraded',
         };
       }
 
@@ -160,6 +188,7 @@ export const rateLimiter = {
           limit,
           remaining: bucket.tokens,
           resetSeconds: Math.max(1, Math.ceil((bucket.resetAt - now) / 1000)),
+          enforcement: 'degraded',
         };
       }
 
@@ -170,8 +199,33 @@ export const rateLimiter = {
         remaining: 0,
         resetSeconds: retryAfter,
         retryAfterSeconds: retryAfter,
+        enforcement: 'degraded',
       };
-    },
+    }
+
+    // Explicit production failure semantics based on route class policy
+    const policy = RATE_LIMIT_FAILURE_POLICY[routeClass] || 'fail_closed';
+    if (policy === 'fail_open') {
+      return {
+        allowed: true,
+        limit,
+        remaining: 1,
+        resetSeconds: WINDOW_SECONDS,
+        enforcement: 'degraded',
+      };
+    }
+
+    // Fail Closed: Return explicit 503-style rate limit failure to protect infrastructure
+    return {
+      allowed: false,
+      limit,
+      remaining: 0,
+      resetSeconds: WINDOW_SECONDS,
+      retryAfterSeconds: WINDOW_SECONDS,
+      error: 'RATE_LIMIT_UNAVAILABLE',
+      enforcement: 'degraded',
+    };
+  },
 
   getHeaders(result: RateLimitResult): Record<string, string> {
     const headers: Record<string, string> = {
@@ -179,8 +233,11 @@ export const rateLimiter = {
       'RateLimit-Remaining': String(Math.max(0, result.remaining)),
       'RateLimit-Reset': String(result.resetSeconds),
     };
-    if (!result.allowed && result.retryAfterSeconds) {
-      headers['Retry-After'] = String(result.retryAfterSeconds);
+    if (!result.allowed && (result.retryAfterSeconds || result.resetSeconds)) {
+      headers['Retry-After'] = String(result.retryAfterSeconds || result.resetSeconds);
+    }
+    if (result.enforcement === 'degraded') {
+      headers['X-RateLimit-Enforcement'] = 'degraded';
     }
     return headers;
   },

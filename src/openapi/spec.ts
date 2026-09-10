@@ -161,7 +161,7 @@ export const openApiSpec: Record<string, any> = {
             type: 'object',
             properties: {
               api_version: { type: 'string', example: 'v1' },
-              platform_version: { type: 'string', example: '3.8.0' },
+              platform_version: { type: 'string', example: '3.8.2' },
               processors: { type: 'object' },
               features: { type: 'object' },
               limits: { type: 'object' },
@@ -235,6 +235,95 @@ export const openApiSpec: Record<string, any> = {
               },
             },
           },
+        },
+      },
+      ApiKey: {
+        type: 'object',
+        required: ['id', 'workspace_id', 'service_account_id', 'name', 'key_prefix', 'scopes', 'status', 'created_at'],
+        properties: {
+          id: { type: 'string', example: 'key_fa9128bc' },
+          workspace_id: { type: 'string', example: 'ws_default' },
+          service_account_id: { type: 'string', example: 'svc_live_app' },
+          name: { type: 'string', example: 'Production Backend Key' },
+          key_prefix: { type: 'string', example: 'mda_live_9a8b7c6d' },
+          scopes: { type: 'array', items: { type: 'string' }, example: ['assets:read', 'assets:write'] },
+          status: { type: 'string', enum: ['active', 'expired', 'revoked'] },
+          expires_at: { type: 'string', format: 'date-time', nullable: true },
+          last_used_at: { type: 'string', format: 'date-time', nullable: true },
+          created_at: { type: 'string', format: 'date-time' },
+          revoked_at: { type: 'string', format: 'date-time', nullable: true },
+        },
+      },
+      WebhookEndpoint: {
+        type: 'object',
+        required: ['id', 'workspace_id', 'target_url', 'events', 'status', 'created_at'],
+        properties: {
+          id: { type: 'string', example: 'wh_fa81b9c2' },
+          workspace_id: { type: 'string', example: 'ws_default' },
+          target_url: { type: 'string', example: 'https://api.yourdomain.com/webhooks/media' },
+          events: { type: 'array', items: { type: 'string' }, example: ['asset.ready', 'asset.failed'] },
+          status: { type: 'string', enum: ['active', 'disabled', 'failing'] },
+          description: { type: 'string', nullable: true },
+          created_at: { type: 'string', format: 'date-time' },
+        },
+      },
+      WorkspaceUsage: {
+        type: 'object',
+        required: ['workspaceId', 'storage', 'assets', 'metrics'],
+        properties: {
+          workspaceId: { type: 'string' },
+          storage: {
+            type: 'object',
+            properties: {
+              usedBytes: { type: 'integer' },
+              limitBytes: { type: 'integer' },
+              usagePercent: { type: 'number' },
+            },
+          },
+          assets: {
+            type: 'object',
+            properties: {
+              totalCount: { type: 'integer' },
+              limitCount: { type: 'integer' },
+              usagePercent: { type: 'number' },
+              breakdown: { type: 'object' },
+            },
+          },
+          metrics: { type: 'object' },
+        },
+      },
+      Capabilities: {
+        type: 'object',
+        required: ['api_version', 'platform_version', 'processors', 'features', 'limits'],
+        properties: {
+          api_version: { type: 'string', example: 'v1' },
+          platform_version: { type: 'string', example: '3.8.2' },
+          processors: { type: 'object' },
+          features: { type: 'object' },
+          limits: { type: 'object' },
+        },
+      },
+      HealthLive: {
+        type: 'object',
+        required: ['status', 'service', 'platform_version', 'api_version', 'timestamp'],
+        properties: {
+          status: { type: 'string', enum: ['ok'] },
+          service: { type: 'string', example: 'media-platform-api' },
+          platform_version: { type: 'string', example: '3.8.2' },
+          api_version: { type: 'string', example: 'v1' },
+          timestamp: { type: 'string', format: 'date-time' },
+        },
+      },
+      HealthDeep: {
+        type: 'object',
+        required: ['status', 'service', 'platform_version', 'api_version', 'timestamp', 'checks'],
+        properties: {
+          status: { type: 'string', enum: ['ok', 'degraded', 'failed'] },
+          service: { type: 'string', example: 'media-platform-api' },
+          platform_version: { type: 'string', example: '3.8.2' },
+          api_version: { type: 'string', example: 'v1' },
+          timestamp: { type: 'string', format: 'date-time' },
+          checks: { type: 'object' },
         },
       },
     },
@@ -633,6 +722,51 @@ export const openApiSpec: Record<string, any> = {
           '400': { description: 'IMAGE_DIMENSION_LIMIT_EXCEEDED or DECOMPRESSION_BOMB_PREVENTED' },
           '403': { description: 'ASSET_QUARANTINED or PERMISSION_DENIED' },
           '404': { description: 'ASSET_NOT_FOUND' },
+        },
+      },
+    },
+    '/delivery/video/{id}/master.m3u8': {
+      get: {
+        operationId: 'deliverHlsMaster',
+        summary: 'Adaptive HLS Master Playlist',
+        description: 'Delivers standardized HLS master playlist with multi-bitrate 30fps ladders.',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'HLS Master Playlist' },
+          '425': { description: 'TOO_EARLY (Transcoding in progress)' },
+          '503': { description: 'MEDIA_ARTIFACT_MISSING' },
+        },
+      },
+    },
+    '/webhooks': {
+      get: {
+        operationId: 'listWebhooks',
+        summary: 'List Webhook Endpoints',
+        responses: {
+          '200': { description: 'Endpoints list', content: { 'application/json': { schema: { type: 'object' } } } },
+        },
+      },
+      post: {
+        operationId: 'createWebhook',
+        summary: 'Register Webhook Endpoint',
+        responses: {
+          '201': { description: 'Endpoint registered with HMAC signing secret', content: { 'application/json': { schema: { type: 'object' } } } },
+        },
+      },
+    },
+    '/developer/apps': {
+      get: {
+        operationId: 'listApplications',
+        summary: 'List Developer Applications',
+        responses: {
+          '200': { description: 'Applications list', content: { 'application/json': { schema: { type: 'object' } } } },
+        },
+      },
+      post: {
+        operationId: 'createApplication',
+        summary: 'Register Developer Application',
+        responses: {
+          '201': { description: 'Application registered', content: { 'application/json': { schema: { type: 'object' } } } },
         },
       },
     },

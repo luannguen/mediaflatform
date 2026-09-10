@@ -74,8 +74,8 @@ async function main() {
   console.log('============================================================\n');
 
   // 1. Version & System Constants
-  await runTest('1.1 Platform Version matches v3.8.0 and API is v1', () => {
-    assert.strictEqual(PLATFORM_VERSION, '3.8.0');
+  await runTest('1.1 Platform Version matches v3.8.2 and API is v1', () => {
+    assert.strictEqual(PLATFORM_VERSION, '3.8.2');
     assert.strictEqual(API_VERSION, 'v1');
   });
 
@@ -182,7 +182,18 @@ async function main() {
     assert.strictEqual(blockedCount, 19, `19 concurrent requests must be rejected as in_progress, got ${blockedCount}`);
 
     // Complete the business operation
-    await idempotencyService.saveResponse(wsId, key, route, payload, 201, { 'content-type': 'application/json' }, { asset_id: 'med_race_done_1' });
+    const winner = reservations.find((r) => r.action === 'execute');
+    await idempotencyService.saveResponse(
+      wsId,
+      key,
+      route,
+      payload,
+      201,
+      { 'content-type': 'application/json' },
+      { asset_id: 'med_race_done_1' },
+      24,
+      winner?.executionToken
+    );
 
     // Subsequent request must receive cached response
     const cachedRes = await idempotencyService.reserveOrGetCached(wsId, key, route, method, payload);
@@ -197,8 +208,18 @@ async function main() {
     const originalPayload = { name: 'Alpha' };
     const tamperedPayload = { name: 'Beta' };
 
-    await idempotencyService.reserveOrGetCached(wsId, key, '/api/v1/uploads', 'POST', originalPayload);
-    await idempotencyService.saveResponse(wsId, key, '/api/v1/uploads', originalPayload, 200, {}, { ok: true });
+    const resOrig = await idempotencyService.reserveOrGetCached(wsId, key, '/api/v1/uploads', 'POST', originalPayload);
+    await idempotencyService.saveResponse(
+      wsId,
+      key,
+      '/api/v1/uploads',
+      originalPayload,
+      200,
+      {},
+      { ok: true },
+      24,
+      resOrig.executionToken
+    );
 
     // Differing payload
     let threwPayload = false;
@@ -225,7 +246,7 @@ async function main() {
   await runTest('6.1 Tier 1 Liveness Probe responds without external queries', () => {
     const live = healthService.getLiveness();
     assert.strictEqual(live.status, 'ok');
-    assert.strictEqual(live.platform_version, '3.8.0');
+    assert.strictEqual(live.platform_version, '3.8.2');
     assert.strictEqual(live.service, 'media-platform-api');
   });
 
@@ -331,7 +352,7 @@ async function main() {
   // 10. OpenAPI 3.1 Contract Specification
   await runTest('10.1 OpenAPI 3.1 document adheres to schema and defines full response schemas', () => {
     assert.strictEqual(openApiSpec.openapi, '3.1.0');
-    assert.strictEqual(openApiSpec.info.version, '3.8.0');
+    assert.strictEqual(openApiSpec.info.version, '3.8.2');
 
     // Every path operation must have an operationId and responses
     for (const [pathKey, methods] of Object.entries(openApiSpec.paths)) {

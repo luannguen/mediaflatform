@@ -7,11 +7,18 @@ To protect distributed systems against network timeouts, dropped connections, an
 ## 1. How It Works
 
 1. Client sends a request with an `Idempotency-Key` header (e.g., UUIDv4 or domain key like `order_123_banner_upload`).
-2. The server hashes the request payload (SHA-256) and stores the key, hash, status, and response.
-3. If a network blip occurs and the client retries the exact same request with the same `Idempotency-Key`:
+2. The server computes a canonical JSON hash (SHA-256 with recursively sorted keys so key order does not alter the fingerprint).
+3. The server atomically attempts to reserve an execution slot in PostgreSQL via `reserve_idempotency_key`, generating a unique `execution_token` and setting a `lease_expires_at` timestamp (default 60 seconds).
+4. **Fail-Closed Semantics**: If the idempotency datastore or RPC cluster is unreachable, the request **fails closed immediately** with HTTP `503 Service Unavailable` (`IDEMPOTENCY_UNAVAILABLE`). The underlying mutation is never executed without idempotency guarantees.
+5. **Execution Fencing & Zombie Rejection**:
+   - The worker holding the valid `execution_token` must complete the request via `complete_idempotency_key` before the lease expires.
+   - If a worker crashes or stalls, another worker can take over the reservation once the lease expires.
+   - Any completion attempt by a zombie worker possessing a superseded token is rejected with `RESERVATION_LOST`.
+   - Long-running jobs can periodically extend their lease via `renew_idempotency_lease`.
+6. If a network blip occurs and the client retries the exact same request with the same `Idempotency-Key`:
    - Media Platform detects the cached result.
    - It returns the original HTTP response status and body immediately without repeating side-effects (e.g. no duplicate asset records or transcoding jobs).
-4. If a client re-uses an `Idempotency-Key` with a **different payload**, the server protects against unintended data corruption by responding with:
+7. If a client re-uses an `Idempotency-Key` with a **different payload or route**, the server protects against unintended data corruption by responding with:
    - HTTP `409 Conflict`
    - Code `IDEMPOTENCY_CONFLICT`
 

@@ -387,8 +387,12 @@ trailer << /Root 1 0 R >>
     headers: { ...authHeaders, 'Content-Type': 'application/json' },
     body: JSON.stringify({ asset_id: docSession.asset_id }),
   });
+  const confirmDocBody = await confirmDocRes.json();
+  if (confirmDocRes.status !== 200) {
+    console.error('confirmDocRes failed:', confirmDocRes.status, confirmDocBody);
+  }
   assert(confirmDocRes.status === 200, `PDF document confirmed`);
-  const confirmedDoc = (await confirmDocRes.json()).data;
+  const confirmedDoc = confirmDocBody.data;
   assert(confirmedDoc.processing_status === 'pending', `Document processing_status is 'pending'`);
   assert(!!confirmedDoc.job_id, `Document extraction job enqueued: ${confirmedDoc.job_id}`);
 

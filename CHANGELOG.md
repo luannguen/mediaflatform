@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.8.2] - 2026-09-10
+
+### Added
+- **Idempotency Execution Fencing & Lease Semantics**:
+  - Added atomic `execution_token` and configurable `lease_expires_at` (default 60s) to `idempotency_records`.
+  - Implemented `renew_idempotency_lease` RPC to allow active long-running workers to extend leases safely.
+  - Hardened `complete_idempotency_key` and `fail_idempotency_key` to atomically reject zombie/stale worker mutations with `RESERVATION_LOST`.
+  - Canonical JSON request body fingerprinting: key-order independent hashing via deep recursive object key sorting.
+- **Rate Limiter Failure Policy & Window Clarification**:
+  - Implemented `RATE_LIMIT_FAILURE_POLICY`: Mutation, upload, expensive transform, and admin routes fail closed (`503 RATE_LIMIT_UNAVAILABLE`) when the rate limiter datastore is unreachable. Read routes fail open with `X-RateLimit-Enforcement: degraded` header.
+  - Eliminated silent in-memory fallback in production environments unless explicitly allowed via `ALLOW_LOCAL_RATE_LIMIT_FALLBACK=true`.
+  - Clarified architectural documentation to **Windowed Token Bucket / Fixed-Window Token Limiter**.
+- **Deterministic Health Subsystem Aggregation & Configuration Validation**:
+  - Implemented `validateRuntimeConfiguration`: Prohibits silent mock fallback in production if Supabase credentials or storage bucket configuration are missing.
+  - Deterministic `aggregateHealthStatus`: Subsystem degradation (e.g. queue stalled with zero workers online, DLQ backlog, RPC integrity degradation) strictly bubbles up to overall status.
+  - Non-mutating signature-aware RPC probe: Upgraded `verify_platform_rpcs()` to verify existence and argument counts (`pronargs`) across all 8 critical platform RPCs via `pg_proc`.
+- **OpenAPI 3.1 Contract Validation**:
+  - Added automated CI contract test (`npm run test:openapi`) using `@apidevtools/swagger-parser` validating structural schema correctness, all 27 unique `operationId`s, required component schemas, and public routes.
+- **Multi-Tenant Webhook Usage Isolation Test**:
+  - Added fixture-driven cross-tenant test proving strictly isolated webhook counts per workspace without leakage.
+- **Security Definer & Role Hardening**:
+  - Set `SET search_path = public` across all platform RPCs.
+  - Revoked execute permissions from `PUBLIC` and `anon`; granted exclusively to `service_role` and `postgres`.
+
+---
+
 ## [3.8.0] - 2026-09-10
 
 ### Added

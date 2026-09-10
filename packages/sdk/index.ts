@@ -1,5 +1,5 @@
 /**
- * @media-platform/sdk v3.8.0
+ * @media-platform/sdk v3.8.2
  * Official TypeScript Client SDK for Media Platform
  * Universal (Node.js 18+, Modern Browsers, Cloudflare Workers, Edge Runtimes)
  */
@@ -224,7 +224,7 @@ export class MediaPlatformClient {
     const headers = new Headers(options.headers || {});
     headers.set('X-Media-Api-Key', this.apiKey);
     headers.set('X-Request-Id', requestId);
-    headers.set('User-Agent', '@media-platform/sdk/3.8.0');
+    headers.set('User-Agent', '@media-platform/sdk/3.8.2');
 
     // Attach default headers
     for (const [k, v] of Object.entries(this.defaultHeaders)) {

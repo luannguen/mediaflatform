@@ -507,12 +507,17 @@ export interface IdempotencyRecord {
   workspace_id: string;
   idempotency_key: string;
   route: string;
+  method?: string;
   request_hash: string;
+  status?: 'PENDING' | 'COMPLETED' | 'FAILED';
+  execution_token?: string | null;
+  lease_expires_at?: string | null;
   response_status: number;
   response_headers: Record<string, string>;
   response_body: any;
   expires_at: string;
   created_at: string;
+  updated_at?: string;
 }
 
 export interface ApiRequestLog {
