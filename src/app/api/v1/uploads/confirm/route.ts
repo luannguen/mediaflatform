@@ -5,9 +5,12 @@ import { AppError } from '@/lib/errors/app-error';
 import { isSupabaseAdminConfigured, supabaseAdmin } from '@/lib/supabase/admin';
 import { mockDb } from '@/lib/mock/store';
 import { webhookService } from '@/services/webhookService';
-import { Asset } from '@/types/database';
-import sharp from 'sharp';
+import { Asset, AssetStatus, ProcessingStatus } from '@/types/database';
 import { jobQueueService } from '@/services/jobQueueService';
+import { getStorageProvider } from '@/lib/storage/factory';
+import { validateDeclaredVsDetectedMime } from '@/lib/media/magicByteValidator';
+import { sanitizeSvg } from '@/lib/media/svgSanitizer';
+import crypto from 'crypto';
 
 export async function POST(req: NextRequest) {
   try {
@@ -40,82 +43,120 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const now = new Date().toISOString();
-    let width = body.width || asset.width || null;
-    let height = body.height || asset.height || null;
-    let sizeBytes = typeof body.size_bytes === 'number' ? body.size_bytes : asset.size_bytes;
-    let checksum = body.checksum || asset.checksum;
-    let palette: { dominant?: string; colors?: string[]; is_dark?: boolean } | undefined = undefined;
-
-    // 2. If it's an image, inspect dimensions and extract palette if storage_url is reachable
-    if (asset.asset_type === 'image' && asset.storage_url && (!width || !height)) {
-      try {
-        let buf: Buffer | null = null;
-        if (asset.storage_url.startsWith('data:')) {
-          const b64 = asset.storage_url.split(',')[1];
-          buf = Buffer.from(b64, 'base64');
-        } else {
-          const fetchRes = await fetch(asset.storage_url);
-          if (fetchRes.ok) {
-            const ab = await fetchRes.arrayBuffer();
-            buf = Buffer.from(ab);
-          }
-        }
-
-        if (buf) {
-          const metadata = await sharp(buf).metadata();
-          width = metadata.width || width;
-          height = metadata.height || height;
-          if (!sizeBytes) sizeBytes = buf.length;
-
-          // Extract 5-color dominant palette
-          const stats = await sharp(buf).stats();
-          const r = Math.round(stats.channels[0].mean);
-          const g = Math.round(stats.channels[1].mean);
-          const b = Math.round(stats.channels[2].mean);
-          const toHex = (cr: number, cg: number, cb: number) =>
-            `#${((1 << 24) + (Math.max(0, Math.min(255, cr)) << 16) + (Math.max(0, Math.min(255, cg)) << 8) + Math.max(0, Math.min(255, cb))).toString(16).slice(1)}`;
-
-          const dominantHex = toHex(r, g, b);
-          const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-          const lightTint = toHex(r + 45, g + 45, b + 45);
-          const darkShade = toHex(r - 45, g - 45, b - 45);
-          const vibrantAccent = toHex(Math.round(r * 1.25), Math.round(g * 0.75), Math.round(b * 1.15));
-          const mutedTone = toHex(Math.round(r * 0.4 + 20), Math.round(g * 0.4 + 20), Math.round(b * 0.4 + 25));
-
-          palette = {
-            dominant: dominantHex,
-            colors: [dominantHex, lightTint, darkShade, vibrantAccent, mutedTone],
-            is_dark: luminance < 0.5,
-          };
-        }
-      } catch (e) {
-        // Non-fatal, keep existing dimensions
-      }
+    // 2. Download and verify storage object
+    const storage = getStorageProvider();
+    let fileBuffer: Buffer | null = null;
+    try {
+      fileBuffer = await storage.download(asset.storage_key);
+    } catch {
+      fileBuffer = null;
     }
 
+    if (!fileBuffer || fileBuffer.length === 0) {
+      throw AppError.badRequest('Uploaded file does not exist in storage bucket', 'UPLOAD_FILE_NOT_FOUND');
+    }
+
+    const realSizeBytes = fileBuffer.length;
+    const realChecksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+
+    // 3. Binary Magic Byte Validation & Anti-Spoofing
+    const detected = validateDeclaredVsDetectedMime(
+      asset.mime_type,
+      fileBuffer,
+      asset.original_filename
+    );
+
+    // 4. Determine Asset Status & Quarantine Handling
+    let assetStatus: AssetStatus = 'active';
+    let processingStatus: ProcessingStatus = 'ready';
+
+    if (detected.isQuarantined || detected.assetType === 'archive' || detected.detectedMime === 'application/x-executable') {
+      assetStatus = 'quarantined';
+      processingStatus = 'ready';
+    } else if (detected.detectedMime === 'image/svg+xml') {
+      // SVG Sanitization
+      const rawSvg = fileBuffer.toString('utf8');
+      const sanitizedSvg = sanitizeSvg(rawSvg);
+      await storage.upload(Buffer.from(sanitizedSvg, 'utf8'), asset.storage_key, 'image/svg+xml');
+      processingStatus = 'ready';
+    }
+
+    const now = new Date().toISOString();
     const updatedMetadata = {
       ...(asset.metadata_json || {}),
       confirmed_at: now,
-      ...(palette ? { palette } : {}),
+      detected_mime: detected.detectedMime,
+      detected_type: detected.assetType,
+      is_quarantined: assetStatus === 'quarantined',
     };
 
-    const processingStatus = asset.asset_type === 'video' ? 'pending' : 'ready';
+    let enqueuedJob: any = null;
 
-    // 3. Update asset status to active
+    // 5. Enqueue Unified Processing Job for non-quarantined media
+    if (assetStatus !== 'quarantined') {
+      if (asset.asset_type === 'video' || detected.assetType === 'video') {
+        processingStatus = 'pending';
+        enqueuedJob = await jobQueueService.enqueueJob({
+          assetId: asset.id,
+          workspaceId: principal.workspaceId,
+          jobType: 'video_transcode',
+          sourceStorageKey: asset.storage_key,
+          sourceStorageUrl: asset.storage_url,
+          priority: 10,
+          metadata: {
+            original_filename: asset.original_filename,
+            mime_type: detected.detectedMime,
+          },
+        });
+      } else if (asset.asset_type === 'image' || detected.assetType === 'image') {
+        processingStatus = 'pending';
+        enqueuedJob = await jobQueueService.enqueueJob({
+          assetId: asset.id,
+          workspaceId: principal.workspaceId,
+          jobType: 'image_optimization',
+          sourceStorageKey: asset.storage_key,
+          sourceStorageUrl: asset.storage_url,
+          priority: 10,
+          metadata: {
+            original_filename: asset.original_filename,
+            mime_type: detected.detectedMime,
+          },
+        });
+      } else if (
+        (asset.asset_type === 'document' || detected.assetType === 'document') &&
+        detected.detectedMime === 'application/pdf'
+      ) {
+        processingStatus = 'pending';
+        enqueuedJob = await jobQueueService.enqueueJob({
+          assetId: asset.id,
+          workspaceId: principal.workspaceId,
+          jobType: 'document_extract',
+          sourceStorageKey: asset.storage_key,
+          sourceStorageUrl: asset.storage_url,
+          priority: 10,
+          metadata: {
+            original_filename: asset.original_filename,
+            mime_type: detected.detectedMime,
+          },
+        });
+      }
+    }
+
+    // 6. Update database record
+    const updatePayload: Partial<Asset> = {
+      status: assetStatus,
+      processing_status: processingStatus,
+      size_bytes: realSizeBytes,
+      checksum: realChecksum,
+      mime_type: detected.detectedMime,
+      metadata_json: updatedMetadata,
+      updated_at: now,
+    };
+
     if (isSupabaseAdminConfigured()) {
       const { data: updated, error } = await supabaseAdmin
         .from('assets')
-        .update({
-          status: 'active',
-          processing_status: processingStatus,
-          width,
-          height,
-          size_bytes: sizeBytes,
-          checksum,
-          metadata_json: updatedMetadata,
-          updated_at: now,
-        })
+        .update(updatePayload)
         .eq('id', assetId)
         .select()
         .single();
@@ -125,36 +166,10 @@ export async function POST(req: NextRequest) {
       }
       asset = updated as Asset;
     } else {
-      asset.status = 'active';
-      asset.processing_status = processingStatus;
-      asset.width = width;
-      asset.height = height;
-      asset.size_bytes = sizeBytes;
-      asset.checksum = checksum;
-      asset.metadata_json = updatedMetadata;
-      asset.updated_at = now;
+      Object.assign(asset, updatePayload);
     }
 
-    // If video, ensure an asynchronous processing job is enqueued
-    if (asset.asset_type === 'video') {
-      const existingJob = await jobQueueService.getJobByAssetId(asset.id);
-      if (!existingJob) {
-        await jobQueueService.enqueueJob({
-          assetId: asset.id,
-          workspaceId: principal.workspaceId,
-          jobType: 'video_transcode',
-          sourceStorageKey: asset.storage_key,
-          sourceStorageUrl: asset.storage_url,
-          priority: 10,
-          metadata: {
-            original_filename: asset.original_filename,
-            mime_type: asset.mime_type,
-          },
-        });
-      }
-    }
-
-    // 4. Trigger Outbound Webhook: asset.created
+    // 7. Trigger Outbound Webhook: asset.created
     try {
       await webhookService.dispatchEvent(principal.workspaceId, 'asset.created', {
         asset_id: asset.id,
@@ -163,13 +178,15 @@ export async function POST(req: NextRequest) {
         mime_type: asset.mime_type,
         size_bytes: asset.size_bytes,
         storage_url: asset.storage_url,
-        confirmed_direct_upload: true,
+        status: asset.status,
+        processing_status: asset.processing_status,
       });
-    } catch {
-      // Non-blocking
-    }
+    } catch {}
 
-    return successResponse(asset);
+    return successResponse({
+      ...asset,
+      job_id: enqueuedJob?.id || null,
+    });
   } catch (error) {
     return errorResponse(error);
   }

@@ -1,7 +1,7 @@
 // Database Entities & Types for Media Platform
 export type AssetType = 'image' | 'video' | 'audio' | 'document' | 'archive' | 'other';
 export type Visibility = 'private' | 'workspace' | 'public';
-export type AssetStatus = 'uploading' | 'active' | 'archived' | 'trashed' | 'deleted' | 'failed';
+export type AssetStatus = 'uploading' | 'active' | 'archived' | 'trashed' | 'deleted' | 'failed' | 'quarantined';
 export type ProcessingStatus = 'pending' | 'processing' | 'ready' | 'partial' | 'failed';
 export type AppEnvironment = 'development' | 'staging' | 'production';
 
@@ -148,7 +148,8 @@ export interface Asset {
 export interface AssetVariant {
   id: string;
   asset_id: string;
-  variant_name: string; // original, thumbnail, small, medium, large
+  variant_name: string; // original, thumb, small, medium, large, xlarge
+  output_version?: string | null;
   storage_provider: string;
   storage_key: string;
   storage_url?: string | null;
@@ -161,6 +162,35 @@ export interface AssetVariant {
   status: string;
   created_at: string;
   updated_at: string;
+}
+
+export type IntegrityIssueType =
+  | 'MISSING_ORIGINAL'
+  | 'MISSING_VARIANT'
+  | 'MISSING_VIDEO_MANIFEST'
+  | 'BROKEN_HLS_REFERENCE'
+  | 'MISSING_DOCUMENT_PREVIEW'
+  | 'ORPHAN_STORAGE_OBJECT'
+  | 'ORPHAN_OUTPUT_VERSION'
+  | 'CHECKSUM_MISMATCH'
+  | 'ABANDONED_UPLOAD'
+  | 'INVALID_STORAGE_REFERENCE';
+
+export type IntegrityIssueSeverity = 'low' | 'medium' | 'high' | 'critical';
+export type IntegrityIssueStatus = 'detected' | 'resolved' | 'ignored';
+
+export interface IntegrityIssue {
+  id: string;
+  workspace_id: string;
+  asset_id?: string | null;
+  issue_type: IntegrityIssueType;
+  severity: IntegrityIssueSeverity;
+  storage_key?: string | null;
+  details?: Record<string, any>;
+  status: IntegrityIssueStatus;
+  detected_at: string;
+  resolved_at?: string | null;
+  created_at: string;
 }
 
 export interface AssetVersion {
@@ -308,7 +338,7 @@ export interface ApiRequestLog {
   created_at: string;
 }
 
-export type JobType = 'video_transcode' | 'image_optimization' | 'audio_transcode' | 'document_extract';
+export type JobType = 'video_transcode' | 'image_optimization' | 'audio_transcode' | 'document_extract' | 'asset_purge';
 export type JobStatus =
   | 'queued'
   | 'pending'

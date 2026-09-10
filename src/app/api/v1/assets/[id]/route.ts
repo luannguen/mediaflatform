@@ -20,7 +20,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     const principal = await authenticateRequest(req, 'assets:write');
     const body = await req.json();
 
-    const updated = await assetService.updateAsset(id, principal.workspaceId, body);
+    const updated = await assetService.updateAsset(id, principal.workspaceId, body, principal);
     return successResponse(updated);
   } catch (error) {
     return errorResponse(error);
@@ -40,8 +40,8 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
       return successResponse(trashed, { message: 'Asset moved to trash' });
     }
 
-    // Purge / Hard Delete (Checks active references)
-    const result = await assetService.safeDeleteAsset(id, principal.workspaceId, force);
+    // Purge / Hard Delete (Checks active references & authorization)
+    const result = await assetService.safeDeleteAsset(id, principal.workspaceId, force, principal);
     return successResponse(result);
   } catch (error) {
     return errorResponse(error);

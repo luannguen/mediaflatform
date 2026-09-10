@@ -7,6 +7,7 @@ import { getStorageProvider } from '@/lib/storage/factory';
 import { isSupabaseAdminConfigured, supabaseAdmin } from '@/lib/supabase/admin';
 import { mockDb } from '@/lib/mock/store';
 import { Asset, AssetType } from '@/types/database';
+import { validateUploadLimits, checkWorkspaceQuota } from '@/lib/security/uploadPolicy';
 
 function detectAssetType(mime: string): AssetType {
   if (mime.startsWith('image/')) return 'image';
@@ -26,16 +27,28 @@ export async function POST(req: NextRequest) {
     const mimeType = (body.mime_type || body.mimeType || 'application/octet-stream').trim().toLowerCase();
     const sizeBytes = typeof body.size_bytes === 'number' ? body.size_bytes : 0;
     const folderId = body.folder_id || null;
-    const visibility = body.visibility || 'workspace';
+    let visibility = body.visibility || 'workspace';
     const expiresIn = typeof body.expires_in === 'number' ? Math.min(3600, Math.max(60, body.expires_in)) : 900;
 
     if (!filename) {
       throw AppError.badRequest('Field "filename" is required');
     }
 
+    const assetType = detectAssetType(mimeType);
+
+    // Enforce size limits and workspace quotas
+    if (sizeBytes > 0) {
+      validateUploadLimits(assetType, sizeBytes);
+      await checkWorkspaceQuota(principal.workspaceId, sizeBytes);
+    }
+
+    // Uploader/Viewer cannot make new uploads directly public
+    if (visibility === 'public' && (principal.role === 'uploader' || principal.role === 'viewer')) {
+      visibility = 'workspace';
+    }
+
     const storageProvider = getStorageProvider();
     const assetId = generateId('med');
-    const assetType = detectAssetType(mimeType);
     const sanitizedFilename = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
     const storageKey = `uploads/${principal.workspaceId}/${Date.now()}_${sanitizedFilename}`;
 

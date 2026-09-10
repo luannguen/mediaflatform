@@ -13,6 +13,8 @@ import {
   WebhookEndpoint,
   WebhookDelivery,
   AssetVersion,
+  AssetVariant,
+  IntegrityIssue,
   UsageMetric,
   ProcessingJob,
 } from '@/types/database';
@@ -54,6 +56,8 @@ class MockDatabase {
   public webhookEndpoints: WebhookEndpoint[] = [];
   public webhookDeliveries: WebhookDelivery[] = [];
   public assetVersions: AssetVersion[] = [];
+  public assetVariants: AssetVariant[] = [];
+  public integrityIssues: IntegrityIssue[] = [];
   public usageMetrics: UsageMetric[] = [];
   public processingJobs: ProcessingJob[] = [];
 

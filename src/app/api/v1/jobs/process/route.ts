@@ -6,7 +6,7 @@ import { AppError } from '@/lib/errors/app-error';
 
 export async function POST(req: NextRequest) {
   try {
-    const principal = await authenticateRequest(req, 'assets:write');
+    const principal = await authenticateRequest(req, 'jobs:process');
 
     let body: any = {};
     try {

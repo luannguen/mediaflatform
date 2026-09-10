@@ -16,14 +16,24 @@ export interface AuthPrincipal {
   workerId?: string;
 }
 
+export const WORKER_ALLOWED_SCOPES = [
+  'jobs:claim',
+  'jobs:heartbeat',
+  'jobs:progress',
+  'jobs:complete',
+  'jobs:fail',
+  'jobs:process',
+  'jobs:read',
+];
+
 const ROLE_DEFAULT_SCOPES: Record<UserRole, string[]> = {
   owner: ['*'],
   admin: ['*'],
-  media_manager: ['assets:*', 'folders:*', 'collections:*', 'uploads:*', 'references:*', 'usage:read', 'analytics:read', 'audit:read'],
-  editor: ['assets:read', 'assets:write', 'assets:delete', 'uploads:create', 'folders:*', 'collections:*', 'references:read', 'references:write', 'analytics:read'],
+  media_manager: ['assets:*', 'folders:*', 'collections:*', 'uploads:*', 'references:*', 'jobs:*', 'usage:read', 'analytics:read', 'audit:read'],
+  editor: ['assets:read', 'assets:write', 'assets:delete', 'uploads:create', 'folders:*', 'collections:*', 'references:read', 'references:write', 'jobs:read', 'jobs:retry', 'analytics:read'],
   uploader: ['assets:read', 'uploads:create', 'folders:read', 'collections:read'],
   viewer: ['assets:read', 'folders:read', 'collections:read', 'references:read'],
-  developer: ['assets:*', 'uploads:create', 'folders:*', 'collections:*', 'references:*', 'webhooks:*', 'analytics:read', 'usage:read'],
+  developer: ['assets:*', 'uploads:create', 'folders:*', 'collections:*', 'references:*', 'jobs:*', 'webhooks:*', 'analytics:read', 'usage:read'],
 };
 
 /**
@@ -40,10 +50,24 @@ export async function authenticateRequest(
   if (authHeader && authHeader.startsWith('Bearer sec_worker_')) {
     const candidateToken = authHeader.replace('Bearer ', '').trim();
     if (workerServiceToken && candidateToken === workerServiceToken) {
+      if (requiredScope) {
+        const isAllowedWorkerScope =
+          WORKER_ALLOWED_SCOPES.includes(requiredScope) ||
+          requiredScope === 'jobs:*' ||
+          requiredScope.startsWith('jobs:');
+
+        if (!isAllowedWorkerScope) {
+          throw AppError.forbidden(
+            `Worker service token lacks required scope [${requiredScope}] and is forbidden from user/delivery operations`,
+            ErrorCodes.PERMISSION_DENIED
+          );
+        }
+      }
+
       return {
         type: 'worker_service',
         workspaceId: req.headers.get('X-Workspace-Id') || mockWorkspace.id,
-        scopes: ['*'],
+        scopes: [...WORKER_ALLOWED_SCOPES],
         workerId: req.headers.get('X-Worker-Id') || 'daemon_service',
       };
     }

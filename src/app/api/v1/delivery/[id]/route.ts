@@ -2,6 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import { assetService } from '@/services/assetService';
 import { analyticsService } from '@/services/analyticsService';
 import { authenticateRequest } from '@/lib/security/auth-guard';
+import { authorize } from '@/lib/security/resourceAuthorization';
+import { getStorageProvider } from '@/lib/storage/factory';
+import { getDeliveryPolicy, get304CacheControl } from '@/lib/media/deliveryPolicy';
+import {
+  validateTransformDimensions,
+  getTransformCacheKey,
+  findCanonicalVariantMatch,
+} from '@/lib/media/transformPolicy';
 import sharp from 'sharp';
 import crypto from 'crypto';
 
@@ -26,25 +34,66 @@ export async function GET(
       return new NextResponse('Asset not found', { status: 404 });
     }
 
-    // Enforce Tenant-Aware Private Delivery Policy
+    // 1. Quarantined Asset Protection
+    if (asset.status === 'quarantined') {
+      return NextResponse.json(
+        {
+          error: 'ASSET_QUARANTINED',
+          message: 'This asset is quarantined for security review and cannot be delivered directly',
+        },
+        {
+          status: 403,
+          headers: {
+            'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+          },
+        }
+      );
+    }
+
+    // 2. Enforce Tenant-Aware Private Delivery Policy & Identity Scope Hardening
     if (asset.visibility === 'private' || asset.visibility === 'workspace') {
       let principal: any;
       try {
         principal = await authenticateRequest(req, 'assets:read');
-      } catch {
+      } catch (err: any) {
+        if (
+          err?.statusCode === 403 ||
+          err?.code === 'PERMISSION_DENIED' ||
+          err?.code === 'INSUFFICIENT_PERMISSIONS' ||
+          err?.code === 'FORBIDDEN'
+        ) {
+          return NextResponse.json(
+            { error: err?.code || 'PERMISSION_DENIED', message: err?.message || 'Forbidden' },
+            {
+              status: 403,
+              headers: {
+                'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+              },
+            }
+          );
+        }
         return NextResponse.json(
           { error: 'UNAUTHORIZED', message: 'Unauthorized: Private asset requires valid credentials' },
           {
             status: 401,
-            headers: { 'WWW-Authenticate': 'Bearer' },
+            headers: {
+              'WWW-Authenticate': 'Bearer',
+              'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+            },
           }
         );
       }
 
-      if (principal.workspaceId !== asset.workspace_id) {
+      const auth = authorize(principal, 'asset.read', asset);
+      if (!auth.allowed) {
         return NextResponse.json(
-          { error: 'PERMISSION_DENIED', message: 'Forbidden: Cross-workspace access denied' },
-          { status: 403 }
+          { error: auth.code || 'PERMISSION_DENIED', message: auth.message || 'Forbidden' },
+          {
+            status: 403,
+            headers: {
+              'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+            },
+          }
         );
       }
     }
@@ -73,6 +122,18 @@ export async function GET(
     const height = heightParam ? parseInt(heightParam, 10) : undefined;
     const quality = qualityParam ? Math.min(100, Math.max(1, parseInt(qualityParam, 10))) : 80;
 
+    // 3. Decompression Bomb Prevention
+    if (width !== undefined || height !== undefined) {
+      try {
+        validateTransformDimensions(width, height);
+      } catch (err: any) {
+        return NextResponse.json(
+          { error: err.code || 'DECOMPRESSION_BOMB_PREVENTED', message: err.message },
+          { status: 400 }
+        );
+      }
+    }
+
     // Dynamic watermark params
     const watermarkText = searchParams.get('watermark_text') || searchParams.get('watermark');
     const hasWatermark = Boolean(watermarkText && watermarkText !== 'false' && watermarkText !== '0');
@@ -84,10 +145,9 @@ export async function GET(
     const etagBasis = `${asset.id}-${asset.updated_at}-${width || 'orig'}-${height || 'orig'}-${formatParam}-${quality}-${fitParam}-${focalKey}-${hasWatermark ? `${watermarkText}-${watermarkPos}-${watermarkOpacity}` : 'none'}`;
     const etag = `W/"${crypto.createHash('md5').update(etagBasis).digest('hex')}"`;
 
-    // Handle Conditional HTTP Request (If-None-Match -> 304 Not Modified)
+    // 4. Handle Conditional HTTP Request (If-None-Match -> 304 Not Modified)
     const ifNoneMatch = req.headers.get('if-none-match');
     if (ifNoneMatch && (ifNoneMatch === etag || ifNoneMatch === '*')) {
-      // Record cache hit metric asynchronously
       analyticsService.recordMetric({
         workspaceId: asset.workspace_id,
         assetId: asset.id,
@@ -103,81 +163,149 @@ export async function GET(
         status: 304,
         headers: {
           'ETag': etag,
-          'Cache-Control': 'public, max-age=31536000, s-maxage=31536000, stale-while-revalidate=86400, immutable',
+          'Cache-Control': get304CacheControl(asset),
           'X-Media-Transform': 'hit-etag-cache',
         },
       });
     }
 
-    // If SVG vector, serve directly
-    if (asset.mime_type === 'image/svg+xml') {
-      if (asset.storage_url) {
-        if (asset.storage_url.startsWith('data:image/svg+xml')) {
-          const svgContent = decodeURIComponent(asset.storage_url.replace(/^data:image\/svg\+xml;utf8,/, ''));
-          return new NextResponse(svgContent, {
-            headers: {
-              'Content-Type': 'image/svg+xml',
-              'ETag': etag,
-              'Cache-Control': 'public, max-age=31536000, s-maxage=31536000, stale-while-revalidate=86400, immutable',
-            },
-          });
-        }
-        return NextResponse.redirect(asset.storage_url);
-      }
-    }
+    const storage = getStorageProvider();
+    const sourceVersion = asset.metadata_json?.active_output_version || 'v1';
 
-    // If not an image (e.g. video, document), either generate dynamic thumbnail poster or redirect
-    if (asset.asset_type !== 'image') {
-      if (widthParam || formatParam) {
-        const iconColor = asset.asset_type === 'video' ? '#A855F7' : '#F59E0B';
-        const label = asset.asset_type.toUpperCase();
-        const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width || 600}" height="${height || 400}" viewBox="0 0 600 400" fill="#090D16"><rect width="600" height="400" fill="#0B0F19"/><rect x="20" y="20" width="560" height="360" rx="16" fill="#131A29" stroke="#1E293B" stroke-width="2"/><circle cx="300" cy="180" r="50" fill="${iconColor}" fill-opacity="0.15"/><polygon points="290,160 320,180 290,200" fill="${iconColor}"/><text x="300" y="270" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="18" font-weight="bold" text-anchor="middle">${asset.display_name.replace(/&/g, '&amp;')}</text><text x="300" y="300" fill="${iconColor}" font-family="system-ui, sans-serif" font-size="13" font-weight="bold" text-anchor="middle">${label} PREVIEW</text></svg>`;
-        return new NextResponse(svg, {
+    // 5. Document Thumbnail Delivery (if PDF)
+    if (asset.asset_type === 'document') {
+      const thumbKey = asset.metadata_json?.document?.thumbnail_key || `documents/${asset.id}/${sourceVersion}/thumbnail.webp`;
+      if (widthParam || formatParam === 'webp' || searchParams.has('thumbnail')) {
+        try {
+          const thumbBuf = await storage.download(thumbKey);
+          if (thumbBuf && thumbBuf.length > 0) {
+            const policy = getDeliveryPolicy(asset, {
+              filename: `${asset.display_name}-thumbnail.webp`,
+              contentType: 'image/webp',
+            });
+            return new NextResponse(new Uint8Array(thumbBuf), {
+              headers: {
+                ...policy.headers,
+                'ETag': etag,
+                'X-Media-Transform': 'hit-document-thumbnail',
+              },
+            });
+          }
+        } catch {}
+      }
+
+      // Serve original document binary
+      const docBuf = await storage.download(asset.storage_key);
+      if (docBuf && docBuf.length > 0) {
+        const policy = getDeliveryPolicy(asset, {
+          filename: asset.original_filename,
+          contentType: asset.mime_type,
+          disposition: 'attachment',
+        });
+        return new NextResponse(new Uint8Array(docBuf), {
           headers: {
-            'Content-Type': 'image/svg+xml',
+            ...policy.headers,
             'ETag': etag,
-            'Cache-Control': 'public, max-age=31536000, s-maxage=31536000, stale-while-revalidate=86400, immutable',
           },
         });
       }
+    }
 
-      if (asset.storage_url) {
-        return NextResponse.redirect(asset.storage_url);
+    // 6. SVG Vector Delivery
+    if (asset.mime_type === 'image/svg+xml') {
+      const svgBuf = await storage.download(asset.storage_key);
+      if (svgBuf && svgBuf.length > 0) {
+        const policy = getDeliveryPolicy(asset, {
+          filename: asset.original_filename,
+          contentType: 'image/svg+xml',
+        });
+        return new NextResponse(svgBuf.toString('utf8'), {
+          headers: {
+            ...policy.headers,
+            'ETag': etag,
+            'Content-Type': 'image/svg+xml',
+          },
+        });
       }
-      return new NextResponse('Asset has no delivery URL', { status: 400 });
     }
 
-    // Fetch the source image
-    if (!asset.storage_url) {
-      return new NextResponse('Source image storage URL missing', { status: 404 });
-    }
-
-    let inputBuffer: Buffer;
-    if (asset.storage_url.startsWith('data:')) {
-      const base64Part = asset.storage_url.split(',')[1];
-      inputBuffer = Buffer.from(base64Part, 'base64');
-    } else {
+    // 7. Check Canonical Variant Pre-rendered Cache (NO UPSCALING)
+    const canonicalMatch = findCanonicalVariantMatch(width, height, formatParam);
+    if (canonicalMatch && !hasWatermark && rawFit === 'cover') {
+      const canonicalKey = `images/${asset.id}/${sourceVersion}/${canonicalMatch}.webp`;
       try {
-        const sourceRes = await fetch(asset.storage_url);
-        if (sourceRes.ok) {
-          const arrayBuffer = await sourceRes.arrayBuffer();
-          inputBuffer = Buffer.from(arrayBuffer);
-        } else {
-          const safeName = asset.display_name.replace(/&/g, '&amp;');
-          const fallbackSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width || 600}" height="${height || 400}"><rect width="100%" height="100%" fill="#0f172a"/><text x="50%" y="50%" fill="#64748b" font-family="system-ui" font-size="18" font-weight="bold" text-anchor="middle">${safeName}</text></svg>`;
-          inputBuffer = Buffer.from(fallbackSvg);
+        const variantBuf = await storage.download(canonicalKey);
+        if (variantBuf && variantBuf.length > 0) {
+          const policy = getDeliveryPolicy(asset, {
+            filename: `${asset.display_name}-${canonicalMatch}.webp`,
+            contentType: 'image/webp',
+          });
+          return new NextResponse(new Uint8Array(variantBuf), {
+            headers: {
+              ...policy.headers,
+              'ETag': etag,
+              'X-Media-Transform': 'hit-canonical-variant',
+            },
+          });
         }
-      } catch {
-        const safeName = asset.display_name.replace(/&/g, '&amp;');
-        const fallbackSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width || 600}" height="${height || 400}"><rect width="100%" height="100%" fill="#0f172a"/><text x="50%" y="50%" fill="#64748b" font-family="system-ui" font-size="18" font-weight="bold" text-anchor="middle">${safeName}</text></svg>`;
-        inputBuffer = Buffer.from(fallbackSvg);
+      } catch {}
+    }
+
+    // 8. Check Deterministic On-Demand Transform Cache
+    const transformCacheKey = getTransformCacheKey(asset.id, sourceVersion, {
+      width,
+      height,
+      format: (['webp', 'avif', 'jpeg', 'png'].includes(formatParam) ? formatParam : 'webp') as any,
+      quality,
+      fit: fitParam,
+      focalX: isFocalCrop ? focalX : undefined,
+      focalY: isFocalCrop ? focalY : undefined,
+      watermark: (hasWatermark && watermarkText) ? watermarkText : undefined,
+    });
+
+    try {
+      const cachedBuf = await storage.download(transformCacheKey);
+      if (cachedBuf && cachedBuf.length > 0) {
+        const policy = getDeliveryPolicy(asset, {
+          filename: `${asset.display_name}.${formatParam}`,
+          contentType: `image/${formatParam}`,
+        });
+        return new NextResponse(new Uint8Array(cachedBuf), {
+          headers: {
+            ...policy.headers,
+            'ETag': etag,
+            'X-Media-Transform': 'hit-transform-cache',
+          },
+        });
+      }
+    } catch {}
+
+    // 9. Fetch source image for transformation
+    let inputBuffer: Buffer | null = await storage.download(asset.storage_key);
+
+    if (!inputBuffer || inputBuffer.length === 0) {
+      if (asset.storage_url && asset.storage_url.startsWith('data:')) {
+        const base64Part = asset.storage_url.split(',')[1];
+        inputBuffer = Buffer.from(base64Part, 'base64');
+      } else if (asset.storage_url) {
+        try {
+          const sourceRes = await fetch(asset.storage_url);
+          if (sourceRes.ok) {
+            inputBuffer = Buffer.from(await sourceRes.arrayBuffer());
+          }
+        } catch {}
       }
     }
 
-    // Perform Sharp transformation pipeline
-    let pipeline = sharp(inputBuffer);
+    if (!inputBuffer || inputBuffer.length === 0) {
+      const safeName = asset.display_name.replace(/&/g, '&amp;');
+      const fallbackSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width || 600}" height="${height || 400}"><rect width="100%" height="100%" fill="#0f172a"/><text x="50%" y="50%" fill="#64748b" font-family="system-ui" font-size="18" font-weight="bold" text-anchor="middle">${safeName}</text></svg>`;
+      inputBuffer = Buffer.from(fallbackSvg);
+    }
 
-    // 1. Resizing & Crop (Focal Point, Smart Attention, or Standard)
+    // 10. Sharp Pipeline Execution
+    let pipeline = sharp(inputBuffer).rotate(); // auto-orient based on EXIF
+
     if (isFocalCrop && width && height) {
       try {
         const meta = await sharp(inputBuffer).metadata();
@@ -222,7 +350,7 @@ export async function GET(
       });
     }
 
-    // 2. Dynamic Watermark Composite
+    // Dynamic Watermark
     if (hasWatermark && watermarkText) {
       const displayText = watermarkText === 'true' || watermarkText === '1' ? 'Media Platform' : watermarkText;
       const safeText = displayText.replace(/[<>&'"]/g, (c) => {
@@ -249,15 +377,10 @@ export async function GET(
 
       type SharpGravity = 'southeast' | 'northeast' | 'southwest' | 'northwest' | 'centre' | 'center';
       let gravity: SharpGravity = 'southeast';
-      if (watermarkPos === 'center' || watermarkPos === 'centre') {
-        gravity = 'centre';
-      } else if (watermarkPos === 'top-left') {
-        gravity = 'northwest';
-      } else if (watermarkPos === 'top-right') {
-        gravity = 'northeast';
-      } else if (watermarkPos === 'bottom-left') {
-        gravity = 'southwest';
-      }
+      if (watermarkPos === 'center' || watermarkPos === 'centre') gravity = 'centre';
+      else if (watermarkPos === 'top-left') gravity = 'northwest';
+      else if (watermarkPos === 'top-right') gravity = 'northeast';
+      else if (watermarkPos === 'bottom-left') gravity = 'southwest';
 
       pipeline = pipeline.composite([
         {
@@ -267,7 +390,7 @@ export async function GET(
       ]);
     }
 
-    // 3. Output Format & Encoding
+    // Format & Quality Encoding
     let contentType = 'image/webp';
     switch (formatParam) {
       case 'avif':
@@ -295,7 +418,10 @@ export async function GET(
     const bytesTransferred = outputBuffer.length;
     const bytesSaved = Math.max(0, asset.size_bytes - bytesTransferred);
 
-    // Record delivery metric asynchronously
+    // Save to transform cache asynchronously
+    storage.upload(outputBuffer, transformCacheKey, contentType).catch(() => {});
+
+    // Record delivery metric
     analyticsService.recordMetric({
       workspaceId: asset.workspace_id,
       assetId: asset.id,
@@ -307,11 +433,15 @@ export async function GET(
       userAgent: req.headers.get('user-agent'),
     }).catch(() => {});
 
+    const deliveryPolicy = getDeliveryPolicy(asset, {
+      filename: `${asset.display_name}.${formatParam}`,
+      contentType,
+    });
+
     return new NextResponse(new Uint8Array(outputBuffer), {
       headers: {
-        'Content-Type': contentType,
+        ...deliveryPolicy.headers,
         'ETag': etag,
-        'Cache-Control': 'public, max-age=31536000, s-maxage=31536000, stale-while-revalidate=86400, immutable',
         'X-Media-Transform': isFocalCrop ? 'sharp-focal-crop' : isSmartCrop ? 'sharp-smart-crop' : 'sharp-node-v1',
       },
     });

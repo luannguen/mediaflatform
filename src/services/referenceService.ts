@@ -49,6 +49,27 @@ export const referenceService = {
     const workspaceId = input.workspaceId || mockWorkspace.id;
     const now = new Date().toISOString();
 
+    // Verify target asset exists and belongs to the specified workspace
+    if (!isSupabaseAdminConfigured()) {
+      const asset = mockDb.assets.find((a) => a.id === input.assetId && a.workspace_id === workspaceId);
+      if (!asset) {
+        throw AppError.badRequest(`Asset ${input.assetId} does not exist or does not belong to workspace ${workspaceId}`);
+      }
+    } else {
+      const { data: asset, error: assetErr } = await supabaseAdmin
+        .from('assets')
+        .select('id, workspace_id')
+        .eq('id', input.assetId)
+        .maybeSingle();
+
+      if (assetErr || !asset) {
+        throw AppError.badRequest(`Asset ${input.assetId} does not exist`);
+      }
+      if (asset.workspace_id !== workspaceId) {
+        throw AppError.badRequest(`Asset ${input.assetId} does not belong to workspace ${workspaceId}`);
+      }
+    }
+
     const record: AssetReference = {
       id,
       workspace_id: workspaceId,
@@ -109,14 +130,21 @@ export const referenceService = {
   },
 
   /**
-   * Sync references for a given entity (Atomic Replace / Sync)
-   * Section 85 of Master Prompt: Client passes current state of references,
-   * server removes stale references and registers new ones.
+   * Sync references for a given entity (Atomic Replace / Sync via PostgreSQL ACID RPC)
+   * Validates workspace boundary for all references, removes stale references, and creates new ones.
    */
   async syncReferences(input: SyncReferencesInput): Promise<{ count: number; synced: AssetReference[] }> {
     const workspaceId = input.workspaceId || mockWorkspace.id;
 
     if (!isSupabaseAdminConfigured()) {
+      // Validate that all reference assetIds belong to workspace
+      for (const item of input.references) {
+        const found = mockDb.assets.find((a) => a.id === item.assetId && a.workspace_id === workspaceId);
+        if (!found) {
+          throw AppError.badRequest(`Asset ${item.assetId} does not belong to workspace ${workspaceId} or does not exist`);
+        }
+      }
+
       // Remove previous references for this entity
       mockDb.references = mockDb.references.filter(
         (r) =>
@@ -145,36 +173,27 @@ export const referenceService = {
       return { count: created.length, synced: created };
     }
 
-    // Supabase Transactional Sync
-    await supabaseAdmin
-      .from('asset_references')
-      .delete()
-      .eq('workspace_id', workspaceId)
-      .eq('source_app', input.sourceApp)
-      .eq('entity_type', input.entityType)
-      .eq('entity_id', input.entityId);
-
-    const recordsToInsert = input.references.map((item) => ({
-      id: generateId('ref'),
-      workspace_id: workspaceId,
-      asset_id: item.assetId,
-      application_id: input.applicationId || null,
-      source_app: input.sourceApp,
-      entity_type: input.entityType,
-      entity_id: input.entityId,
-      field_name: item.fieldName || null,
-      context: item.context || {},
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+    // Call PostgreSQL RPC sync_asset_references (ACID atomic sync & workspace boundary validation)
+    const jsonRefs = input.references.map((r) => ({
+      asset_id: r.assetId,
+      field_name: r.fieldName || null,
+      context: r.context || {},
     }));
 
-    if (recordsToInsert.length === 0) {
-      return { count: 0, synced: [] };
+    const { data, error } = await supabaseAdmin.rpc('sync_asset_references', {
+      p_workspace_id: workspaceId,
+      p_source_app: input.sourceApp,
+      p_entity_type: input.entityType,
+      p_entity_id: input.entityId,
+      p_application_id: input.applicationId || null,
+      p_references: jsonRefs,
+    });
+
+    if (error) {
+      throw AppError.badRequest(`Failed to sync references: ${error.message}`);
     }
 
-    const { data, error } = await supabaseAdmin.from('asset_references').insert(recordsToInsert).select();
-
-    if (error) throw AppError.internal(`Failed to sync references: ${error.message}`);
-    return { count: (data || []).length, synced: (data as AssetReference[]) || [] };
+    const count = typeof (data as any)?.count === 'number' ? (data as any).count : (Array.isArray(data) ? data.length : 0);
+    return { count, synced: (data as any)?.synced || [] };
   },
 };

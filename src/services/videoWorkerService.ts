@@ -5,6 +5,8 @@ import { ProcessingJob, Asset } from '@/types/database';
 import { AppError } from '@/lib/errors/app-error';
 import { videoEngine, VideoProfileDef, CANONICAL_LADDER } from '@/lib/media/videoEngine';
 import { mediaWorkerCore } from '@/lib/media/workerCore';
+import { imageWorkerCore } from '@/lib/media/imageWorkerCore';
+import { documentWorkerCore } from '@/lib/media/documentWorkerCore';
 import { isSupabaseAdminConfigured, supabaseAdmin } from '@/lib/supabase/admin';
 import { getStorageProvider } from '@/lib/storage/factory';
 import fs from 'fs';
@@ -94,53 +96,120 @@ export const videoWorkerService = {
         }
       }, 15000);
 
-      // Stage source video
-      await this.stageSourceVideo(asset, sourcePath);
-
-      // Execute unified pipeline via MediaWorkerCore
       const storage = getStorageProvider();
-      const outputManifest = await mediaWorkerCore.executePipeline({
-        jobId: job.id,
-        workerId,
-        runId: job.job_run_id || '',
-        asset,
-        outputVersion,
-        workDir,
-        bucket: process.env.SUPABASE_STORAGE_BUCKET || 'media-assets',
-        abortController,
-        storageUploader: async (data, key, mimeType) => {
-          return await storage.upload(data, key, mimeType);
-        },
-        heartbeatRenewer: async () => {
-          const ok = await jobQueueService.renewHeartbeat(job.id, workerId, job.job_run_id || undefined);
-          if (!ok) abortController.abort();
-          return ok;
-        },
-        fencedPublisher: async (manifest) => {
-          await jobQueueService.completeJob(job.id, manifest, outputVersion, leaseContext);
-          return true;
-        },
-        progressUpdater: async (stage, percent, meta) => {
-          await jobQueueService.updateJobProgress(job.id, stage as any, percent, meta, leaseContext);
-        },
-      });
 
-      // Outbound webhook notification
-      webhookService.dispatchEvent(
-        asset.workspace_id,
-        'video.processed',
-        {
-          asset_id: asset.id,
-          job_id: job.id,
-          output_version: outputVersion,
-          profiles: outputManifest.target_profiles,
-          master_url: `/api/v1/delivery/video/${asset.id}/master.m3u8`,
-        },
-        { eventId: `evt_video_${job.id}_${outputVersion}` }
-      );
+      if (job.job_type === 'image_optimization') {
+        const outputManifest = await imageWorkerCore.executePipeline({
+          jobId: job.id,
+          workerId,
+          runId: job.job_run_id || '',
+          asset,
+          outputVersion,
+          workDir,
+          bucket: process.env.SUPABASE_STORAGE_BUCKET || 'media-assets',
+          abortSignal: abortController.signal,
+          storageUploader: async (data, key, mimeType) => {
+            return await storage.upload(data, key, mimeType);
+          },
+          progressUpdater: async (stage, percent, meta) => {
+            await jobQueueService.updateJobProgress(job.id, stage as any, percent, meta, leaseContext);
+          },
+        });
 
-      const completedJob = await jobQueueService.getJobById(job.id);
-      return completedJob || (job as ProcessingJob);
+        webhookService.dispatchEvent(
+          asset.workspace_id,
+          'image.processed',
+          {
+            asset_id: asset.id,
+            job_id: job.id,
+            output_version: outputVersion,
+            variants: outputManifest.variants,
+          },
+          { eventId: `evt_image_${job.id}_${outputVersion}` }
+        );
+
+        const completedJob = await jobQueueService.getJobById(job.id);
+        return completedJob || (job as ProcessingJob);
+      } else if (job.job_type === 'document_extract') {
+        const outputManifest = await documentWorkerCore.executePipeline({
+          jobId: job.id,
+          workerId,
+          runId: job.job_run_id || '',
+          asset,
+          outputVersion,
+          workDir,
+          abortSignal: abortController.signal,
+          storageUploader: async (data, key, mimeType) => {
+            return await storage.upload(data, key, mimeType);
+          },
+          progressUpdater: async (stage, percent, meta) => {
+            await jobQueueService.updateJobProgress(job.id, stage as any, percent, meta, leaseContext);
+          },
+        });
+
+        webhookService.dispatchEvent(
+          asset.workspace_id,
+          'document.processed',
+          {
+            asset_id: asset.id,
+            job_id: job.id,
+            output_version: outputVersion,
+            page_count: outputManifest.page_count,
+            thumbnail_key: outputManifest.thumbnail_key,
+          },
+          { eventId: `evt_doc_${job.id}_${outputVersion}` }
+        );
+
+        const completedJob = await jobQueueService.getJobById(job.id);
+        return completedJob || (job as ProcessingJob);
+      } else {
+        // Video transcode pipeline
+        // Stage source video
+        await this.stageSourceVideo(asset, sourcePath);
+
+        const outputManifest = await mediaWorkerCore.executePipeline({
+          jobId: job.id,
+          workerId,
+          runId: job.job_run_id || '',
+          asset,
+          outputVersion,
+          workDir,
+          bucket: process.env.SUPABASE_STORAGE_BUCKET || 'media-assets',
+          abortController,
+          storageUploader: async (data, key, mimeType) => {
+            return await storage.upload(data, key, mimeType);
+          },
+          heartbeatRenewer: async () => {
+            const ok = await jobQueueService.renewHeartbeat(job.id, workerId, job.job_run_id || undefined);
+            if (!ok) abortController.abort();
+            return ok;
+          },
+          fencedPublisher: async (manifest) => {
+            await jobQueueService.completeJob(job.id, manifest, outputVersion, leaseContext);
+            return true;
+          },
+          progressUpdater: async (stage, percent, meta) => {
+            await jobQueueService.updateJobProgress(job.id, stage as any, percent, meta, leaseContext);
+          },
+        });
+
+        // Outbound webhook notification
+        webhookService.dispatchEvent(
+          asset.workspace_id,
+          'video.processed',
+          {
+            asset_id: asset.id,
+            job_id: job.id,
+            output_version: outputVersion,
+            profiles: outputManifest.target_profiles,
+            master_url: `/api/v1/delivery/video/${asset.id}/master.m3u8`,
+          },
+          { eventId: `evt_video_${job.id}_${outputVersion}` }
+        );
+
+        const completedJob = await jobQueueService.getJobById(job.id);
+        return completedJob || (job as ProcessingJob);
+      }
     } catch (err: any) {
       if (err instanceof LeaseLostError || err.name === 'LeaseLostError' || (err.message && err.message.includes('LEASE_LOST'))) {
         console.warn(`[VideoWorker] ABORTING: Lease was lost or reclaimed by another worker for job ${job.id}:`, err.message);

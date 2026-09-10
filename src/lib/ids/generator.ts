@@ -23,6 +23,7 @@ export type IdPrefix =
   | 'inv'
   | 'ver'
   | 'met'
+  | 'iss'
   | 'run';
 
 /**

@@ -373,7 +373,7 @@ async function runV36Tests() {
 
     // 6.3 Legitimate Tenant Request from ws_default -> Passes authorization boundary
     const legitTenantHeaders = {
-      Authorization: 'Bearer ' + workerToken,
+      Cookie: cookieHeader,
       'X-Workspace-Id': 'ws_default',
     };
 

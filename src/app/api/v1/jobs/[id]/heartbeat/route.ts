@@ -9,7 +9,7 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const principal = await authenticateRequest(req, 'assets:write');
+    const principal = await authenticateRequest(req, 'jobs:heartbeat');
     const { id: jobId } = await params;
 
     let body: any = {};

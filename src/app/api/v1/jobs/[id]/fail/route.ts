@@ -9,7 +9,7 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const principal = await authenticateRequest(req, 'assets:write');
+    const principal = await authenticateRequest(req, 'jobs:fail');
     const { id: jobId } = await params;
 
     const existing = await jobQueueService.getJobById(jobId);

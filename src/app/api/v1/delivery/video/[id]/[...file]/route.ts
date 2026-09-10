@@ -3,6 +3,7 @@ import { assetService } from '@/services/assetService';
 import { videoService } from '@/services/videoService';
 import { getStorageProvider } from '@/lib/storage/factory';
 import { authenticateRequest } from '@/lib/security/auth-guard';
+import { authorize } from '@/lib/security/resourceAuthorization';
 
 export async function GET(
   req: NextRequest,
@@ -31,21 +32,45 @@ export async function GET(
       let principal: any;
       try {
         principal = await authenticateRequest(req, 'assets:read');
-      } catch {
+      } catch (err: any) {
+        if (
+          err?.statusCode === 403 ||
+          err?.code === 'PERMISSION_DENIED' ||
+          err?.code === 'INSUFFICIENT_PERMISSIONS' ||
+          err?.code === 'FORBIDDEN'
+        ) {
+          return NextResponse.json(
+            { error: err?.code || 'PERMISSION_DENIED', message: err?.message || 'Forbidden' },
+            {
+              status: 403,
+              headers: {
+                'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+              },
+            }
+          );
+        }
         return NextResponse.json(
           { error: 'UNAUTHORIZED', message: 'Unauthorized: Private asset requires valid credentials' },
           {
             status: 401,
-            headers: { 'WWW-Authenticate': 'Bearer' },
+            headers: {
+              'WWW-Authenticate': 'Bearer',
+              'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+            },
           }
         );
       }
 
-      // Strict Multi-Tenant Isolation: Tenant A cannot access Tenant B's private media
-      if (principal.workspaceId !== asset.workspace_id) {
+      const auth = authorize(principal, 'asset.read', asset);
+      if (!auth.allowed) {
         return NextResponse.json(
-          { error: 'PERMISSION_DENIED', message: 'Forbidden: Cross-workspace access denied' },
-          { status: 403 }
+          { error: auth.code || 'PERMISSION_DENIED', message: auth.message || 'Forbidden' },
+          {
+            status: 403,
+            headers: {
+              'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+            },
+          }
         );
       }
     }
@@ -97,7 +122,7 @@ export async function GET(
         headers: {
           'Content-Type': 'application/vnd.apple.mpegurl',
           'Access-Control-Allow-Origin': '*',
-          'Cache-Control': isPrivate ? 'private, no-cache' : 'public, max-age=86400, s-maxage=86400, immutable',
+          'Cache-Control': isPrivate ? 'private, no-cache, no-store, must-revalidate' : 'public, max-age=86400, s-maxage=86400, immutable',
         },
       });
     }
@@ -119,7 +144,7 @@ export async function GET(
         headers: {
           'Content-Type': 'application/vnd.apple.mpegurl',
           'Access-Control-Allow-Origin': '*',
-          'Cache-Control': isPrivate ? 'private, no-cache' : 'public, max-age=86400, s-maxage=86400, immutable',
+          'Cache-Control': isPrivate ? 'private, no-cache, no-store, must-revalidate' : 'public, max-age=86400, s-maxage=86400, immutable',
         },
       });
     }
@@ -131,7 +156,7 @@ export async function GET(
         headers: {
           'Content-Type': 'image/webp',
           'Access-Control-Allow-Origin': '*',
-          'Cache-Control': isPrivate ? 'private, no-cache' : 'public, max-age=31536000, s-maxage=31536000, immutable',
+          'Cache-Control': isPrivate ? 'private, no-cache, no-store, must-revalidate' : 'public, max-age=31536000, s-maxage=31536000, immutable',
         },
       });
     }
@@ -143,7 +168,7 @@ export async function GET(
         headers: {
           'Content-Type': 'image/webp',
           'Access-Control-Allow-Origin': '*',
-          'Cache-Control': isPrivate ? 'private, no-cache' : 'public, max-age=31536000, s-maxage=31536000, immutable',
+          'Cache-Control': isPrivate ? 'private, no-cache, no-store, must-revalidate' : 'public, max-age=31536000, s-maxage=31536000, immutable',
         },
       });
     }
@@ -181,7 +206,7 @@ export async function GET(
           status: 307,
           headers: {
             'Access-Control-Allow-Origin': '*',
-            'Cache-Control': isPrivate ? 'private, no-cache' : 'public, max-age=31536000, s-maxage=31536000, immutable',
+            'Cache-Control': isPrivate ? 'private, no-cache, no-store, must-revalidate' : 'public, max-age=31536000, s-maxage=31536000, immutable',
           },
         });
       }

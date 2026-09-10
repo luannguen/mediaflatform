@@ -6,6 +6,9 @@ import { isSupabaseAdminConfigured, supabaseAdmin } from '@/lib/supabase/admin';
 import { mockDb, mockWorkspace } from '@/lib/mock/store';
 import { getStorageProvider } from '@/lib/storage/factory';
 import { webhookService } from '@/services/webhookService';
+import { purgeService } from '@/services/purgeService';
+import { authorize } from '@/lib/security/resourceAuthorization';
+import { AuthPrincipal } from '@/lib/security/auth-guard';
 
 export interface ListAssetsParams {
   workspaceId?: string;
@@ -407,19 +410,101 @@ export const assetService = {
     return resultAsset;
   },
 
-  async updateAsset(id: string, workspaceId: string = mockWorkspace.id, patch: Partial<Asset>): Promise<Asset> {
+  async updateAsset(
+    id: string,
+    workspaceId: string = mockWorkspace.id,
+    patch: Partial<Asset>,
+    principal?: AuthPrincipal
+  ): Promise<Asset> {
     const now = new Date().toISOString();
+
+    // 1. Fetch current asset
+    let currentAsset: Asset | null = null;
+    if (!isSupabaseAdminConfigured()) {
+      currentAsset = mockDb.assets.find((a) => a.id === id && a.workspace_id === workspaceId) || null;
+    } else {
+      const { data } = await supabaseAdmin
+        .from('assets')
+        .select('*')
+        .eq('id', id)
+        .eq('workspace_id', workspaceId)
+        .maybeSingle();
+      currentAsset = (data as Asset) || null;
+    }
+
+    if (!currentAsset) throw AppError.notFound(`Asset ${id} not found`);
+
+    // 2. If called by user API (principal present), enforce DTO whitelist & authorization
+    let sanitizedPatch: Partial<Asset> = {};
+
+    if (principal) {
+      // Authorization check for worker token or restricted roles
+      const auth = authorize(principal, 'asset.update', currentAsset);
+      if (!auth.allowed) {
+        throw AppError.forbidden(auth.message || 'Permission denied', auth.code || ErrorCodes.PERMISSION_DENIED);
+      }
+
+      // Check immutable fields: reject attempts to mutate system / storage fields
+      const immutableFields: (keyof Asset)[] = [
+        'workspace_id',
+        'storage_key',
+        'checksum',
+        'size_bytes',
+        'mime_type',
+        'processing_status',
+        'status',
+        'created_at',
+        'storage_bucket',
+        'storage_provider',
+      ];
+
+      for (const field of immutableFields) {
+        if (field in patch && (patch as any)[field] !== undefined) {
+          throw AppError.badRequest(
+            `Field "${field}" is immutable and cannot be updated via Asset PATCH API`,
+            'IMMUTABLE_FIELD_MUTATION'
+          );
+        }
+      }
+
+      // Whitelisted mutable fields
+      if (patch.display_name !== undefined) sanitizedPatch.display_name = patch.display_name;
+      if (patch.description !== undefined) sanitizedPatch.description = patch.description;
+      if (patch.folder_id !== undefined) sanitizedPatch.folder_id = patch.folder_id;
+
+      // Visibility update authorization check
+      if (patch.visibility !== undefined && patch.visibility !== currentAsset.visibility) {
+        const visAuth = authorize(principal, 'asset.change_visibility', currentAsset);
+        if (!visAuth.allowed) {
+          throw AppError.forbidden(visAuth.message || 'Not authorized to change visibility', visAuth.code);
+        }
+        sanitizedPatch.visibility = patch.visibility;
+      }
+
+      // Metadata JSON updates (merge focal_point, tags, etc.)
+      if (patch.metadata_json !== undefined) {
+        sanitizedPatch.metadata_json = {
+          ...(currentAsset.metadata_json || {}),
+          ...patch.metadata_json,
+        };
+      }
+    } else {
+      // Internal system call (e.g. trashAsset, restoreAsset)
+      sanitizedPatch = { ...patch };
+    }
+
+    sanitizedPatch.updated_at = now;
 
     if (!isSupabaseAdminConfigured()) {
       const idx = mockDb.assets.findIndex((a) => a.id === id && a.workspace_id === workspaceId);
       if (idx === -1) throw AppError.notFound(`Asset ${id} not found`);
-      mockDb.assets[idx] = { ...mockDb.assets[idx], ...patch, updated_at: now };
+      mockDb.assets[idx] = { ...mockDb.assets[idx], ...sanitizedPatch };
       return mockDb.assets[idx];
     }
 
     const { data, error } = await supabaseAdmin
       .from('assets')
-      .update({ ...patch, updated_at: now })
+      .update(sanitizedPatch)
       .eq('id', id)
       .eq('workspace_id', workspaceId)
       .select()
@@ -471,76 +556,63 @@ export const assetService = {
   },
 
   /**
-   * Safe Delete:
+   * Safe Delete / Permanent Purge:
    * 1. Checks if asset has active references.
    * 2. If references > 0 and force is false -> BLOCKS deletion with ASSET_IN_USE and details.
-   * 3. If allowed, deletes physical file from storage provider and deletes record from DB.
+   * 3. Authorizes principal (if provided).
+   * 4. Idempotently purges entire artifact graph (originals, variants, versions, transforms, HLS playlists, documents, DB rows).
    */
-  async safeDeleteAsset(id: string, workspaceId: string = mockWorkspace.id, force: boolean = false) {
+  async safeDeleteAsset(
+    id: string,
+    workspaceId: string = mockWorkspace.id,
+    force: boolean = false,
+    principal?: AuthPrincipal
+  ) {
+    let asset: Asset | null = null;
+    let references: any[] = [];
+
     if (!isSupabaseAdminConfigured()) {
-      const asset = mockDb.assets.find((a) => a.id === id && a.workspace_id === workspaceId);
+      asset = mockDb.assets.find((a) => a.id === id && a.workspace_id === workspaceId) || null;
       if (!asset) throw AppError.notFound(`Asset ${id} not found`);
+      references = mockDb.references.filter((r) => r.asset_id === id);
+    } else {
+      const { data, error: fetchErr } = await supabaseAdmin
+        .from('assets')
+        .select('*')
+        .eq('id', id)
+        .eq('workspace_id', workspaceId)
+        .maybeSingle();
 
-      const references = mockDb.references.filter((r) => r.asset_id === id);
-      if (references.length > 0 && !force) {
-        throw AppError.conflict(
-          `Cannot delete asset ${id} because it is currently referenced by ${references.length} external entities. Remove these references first or specify force delete.`,
-          ErrorCodes.ASSET_IN_USE,
-          { references }
-        );
-      }
+      if (fetchErr || !data) throw AppError.notFound(`Asset ${id} not found`);
+      asset = data as Asset;
 
-      // Safe to delete
-      const storage = getStorageProvider();
-      await storage.delete(asset.storage_key);
+      const { data: refs } = await supabaseAdmin
+        .from('asset_references')
+        .select('*')
+        .eq('asset_id', id);
 
-      mockDb.assets = mockDb.assets.filter((a) => a.id !== id);
-      mockDb.references = mockDb.references.filter((r) => r.asset_id !== id);
-
-      webhookService
-        .dispatchEvent(workspaceId, 'asset.deleted', {
-          asset_id: id,
-          deleted_at: new Date().toISOString(),
-        })
-        .catch((err) => console.warn('[Webhook] Dispatch error:', err.message));
-
-      return { success: true, id, message: 'Asset deleted successfully' };
+      references = refs || [];
     }
 
-    // Real Supabase flow
-    const { data: asset, error: fetchErr } = await supabaseAdmin
-      .from('assets')
-      .select('*')
-      .eq('id', id)
-      .eq('workspace_id', workspaceId)
-      .single();
+    // Role-based authorization for permanent purge
+    if (principal) {
+      const auth = authorize(principal, 'asset.purge', asset);
+      if (!auth.allowed) {
+        throw AppError.forbidden(auth.message || 'Permission denied', auth.code);
+      }
+    }
 
-    if (fetchErr || !asset) throw AppError.notFound(`Asset ${id} not found`);
-
-    const { data: references } = await supabaseAdmin
-      .from('asset_references')
-      .select('*')
-      .eq('asset_id', id);
-
-    if (references && references.length > 0 && !force) {
+    // Reference safety check
+    if (references.length > 0 && !force) {
       throw AppError.conflict(
-        `Cannot delete asset ${id} because it is referenced in ${references.length} external locations.`,
+        `Cannot delete asset ${id} because it is currently referenced by ${references.length} external entities. Remove these references first or specify force delete.`,
         ErrorCodes.ASSET_IN_USE,
         { references }
       );
     }
 
-    // Delete storage object
-    const storage = getStorageProvider();
-    await storage.delete(asset.storage_key, asset.storage_bucket);
-
-    // Delete database records
-    await supabaseAdmin.from('asset_references').delete().eq('asset_id', id);
-    const { error: delErr } = await supabaseAdmin.from('assets').delete().eq('id', id);
-
-    if (delErr) {
-      throw AppError.internal(`Failed to delete asset: ${delErr.message}`);
-    }
+    // Execute comprehensive artifact graph purge
+    const purgeResult = await purgeService.purgeAssetArtifactGraph(id, workspaceId);
 
     webhookService
       .dispatchEvent(workspaceId, 'asset.deleted', {
@@ -549,7 +621,12 @@ export const assetService = {
       })
       .catch((err) => console.warn('[Webhook] Dispatch error:', err.message));
 
-    return { success: true, id, message: 'Asset purged successfully' };
+    return {
+      success: true,
+      id,
+      message: 'Asset purged successfully',
+      details: purgeResult,
+    };
   },
 
   async listAssetVersions(assetId: string, workspaceId: string = mockWorkspace.id): Promise<AssetVersion[]> {
