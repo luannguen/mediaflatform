@@ -14,13 +14,13 @@ export const dynamic = 'force-dynamic';
  * POST /api/v1/assets/:id/delivery-grant
  * Mint a scoped, short-lived cryptographic delivery grant for browser media tags (img, video, HLS)
  */
-export async function POST(
+async function handleDeliveryGrant(
   req: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
+  paramsPromise: Promise<{ id: string }>
 ) {
   const requestId = extractRequestId(req);
   try {
-    const { id: assetId } = await params;
+    const { id: assetId } = await paramsPromise;
     const principal = await authenticateRequest(req, 'assets:read');
 
     let asset: any = null;
@@ -47,18 +47,33 @@ export async function POST(
       );
     }
 
-    let body: any = {};
-    try {
-      body = await req.json();
-    } catch {
-      // Empty body allowed
+    let permissions: string[] = ['poster:read', 'preview:read', 'hls:read'];
+    let ttlSeconds: number | undefined = undefined;
+
+    if (req.method === 'GET') {
+      const qPerms = req.nextUrl.searchParams.get('permissions');
+      if (qPerms) {
+        permissions = qPerms.split(',').map((p) => p.trim()).filter(Boolean);
+      }
+      const qTtl = req.nextUrl.searchParams.get('ttl_seconds');
+      if (qTtl) {
+        const parsed = parseInt(qTtl, 10);
+        if (!isNaN(parsed)) ttlSeconds = parsed;
+      }
+    } else {
+      let body: any = {};
+      try {
+        body = await req.json();
+      } catch {
+        // Empty body allowed
+      }
+      if (Array.isArray(body.permissions) && body.permissions.length > 0) {
+        permissions = body.permissions;
+      }
+      if (typeof body.ttl_seconds === 'number') {
+        ttlSeconds = body.ttl_seconds;
+      }
     }
-
-    const permissions = Array.isArray(body.permissions) && body.permissions.length > 0
-      ? body.permissions
-      : ['poster:read', 'preview:read', 'hls:read'];
-
-    const ttlSeconds = typeof body.ttl_seconds === 'number' ? body.ttl_seconds : undefined;
 
     // If asset is public, grant is not required; clean URLs returned
     if (asset.visibility === 'public') {
@@ -111,4 +126,18 @@ export async function POST(
   } catch (error) {
     return errorResponse(error, requestId);
   }
+}
+
+export async function GET(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  return handleDeliveryGrant(req, params);
+}
+
+export async function POST(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  return handleDeliveryGrant(req, params);
 }
