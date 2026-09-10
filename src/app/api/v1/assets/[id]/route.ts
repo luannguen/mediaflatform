@@ -33,7 +33,9 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
     const principal = await authenticateRequest(req, 'assets:delete');
     const { searchParams } = new URL(req.url);
     const force = searchParams.get('force') === 'true';
-    const action = searchParams.get('action') || 'trash'; // 'trash' or 'purge'
+    const actionParam = searchParams.get('action');
+    const isPermanent = searchParams.get('permanent') === 'true';
+    const action = actionParam || (isPermanent ? 'purge' : 'trash'); // 'trash' or 'purge'
 
     if (action === 'trash') {
       const trashed = await assetService.trashAsset(id, principal.workspaceId);

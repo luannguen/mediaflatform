@@ -372,16 +372,29 @@ export class MediaPlatformClient {
     if (opts.tags && opts.tags.length > 0) formData.append('tags', JSON.stringify(opts.tags));
     if (opts.metadata) formData.append('metadata', JSON.stringify(opts.metadata));
 
-    return this.request<Asset>('/api/v1/uploads/direct', {
+    return this.request<Asset>('/api/v1/uploads', {
       method: 'POST',
       body: formData,
       ...options,
     });
   }
 
-  async deleteAsset(id: string, opts?: { permanent?: boolean }, options?: RequestOptions): Promise<{ success: boolean; deleted_id: string }> {
-    const qs = opts?.permanent ? '?permanent=true' : '';
-    return this.request(`/api/v1/assets/${id}${qs}`, {
+  async deleteAsset(
+    id: string,
+    opts?: { permanent?: boolean; force?: boolean; action?: 'trash' | 'purge' },
+    options?: RequestOptions
+  ): Promise<{ success: boolean; [key: string]: any }> {
+    const params = new URLSearchParams();
+    const isPurge = opts?.permanent || opts?.action === 'purge';
+    if (isPurge) {
+      params.set('action', 'purge');
+      params.set('permanent', 'true');
+    }
+    if (opts?.force) {
+      params.set('force', 'true');
+    }
+    const qs = params.toString();
+    return this.request(`/api/v1/assets/${id}${qs ? `?${qs}` : ''}`, {
       method: 'DELETE',
       ...options,
     });

@@ -38,6 +38,16 @@ export const openApiSpec: Record<string, any> = {
       },
     },
     schemas: {
+      StandardMeta: {
+        type: 'object',
+        properties: {
+          request_id: { type: 'string', example: 'req_1j8m4k9a' },
+          timestamp: { type: 'string', format: 'date-time' },
+          total: { type: 'integer' },
+          limit: { type: 'integer' },
+          offset: { type: 'integer' },
+        },
+      },
       ErrorResponse: {
         type: 'object',
         required: ['success', 'error'],
@@ -57,6 +67,7 @@ export const openApiSpec: Record<string, any> = {
       },
       Asset: {
         type: 'object',
+        required: ['id', 'workspace_id', 'asset_type', 'original_filename', 'mime_type', 'size_bytes', 'visibility', 'status'],
         properties: {
           id: { type: 'string', example: 'med_fa2149b1c' },
           workspace_id: { type: 'string', example: 'ws_default' },
@@ -70,9 +81,29 @@ export const openApiSpec: Record<string, any> = {
           status: { type: 'string', enum: ['active', 'quarantined', 'trashed', 'deleted'] },
           processing_status: { type: 'string', enum: ['pending', 'processing', 'ready', 'failed'] },
           active_output_version: { type: 'string', example: 'v1_fa50e54f' },
+          storage_url: { type: 'string', example: 'https://cdn.yourdomain.com/api/v1/delivery/med_fa2149b1c' },
           metadata_json: { type: 'object', additionalProperties: true },
           created_at: { type: 'string', format: 'date-time' },
           updated_at: { type: 'string', format: 'date-time' },
+        },
+      },
+      AssetListResponse: {
+        type: 'object',
+        properties: {
+          success: { type: 'boolean', example: true },
+          data: {
+            type: 'array',
+            items: { $ref: '#/components/schemas/Asset' },
+          },
+          meta: { $ref: '#/components/schemas/StandardMeta' },
+        },
+      },
+      AssetSingleResponse: {
+        type: 'object',
+        properties: {
+          success: { type: 'boolean', example: true },
+          data: { $ref: '#/components/schemas/Asset' },
+          meta: { $ref: '#/components/schemas/StandardMeta' },
         },
       },
       PresignedUploadRequest: {
@@ -89,10 +120,16 @@ export const openApiSpec: Record<string, any> = {
       PresignedUploadResponse: {
         type: 'object',
         properties: {
-          asset_id: { type: 'string', example: 'med_fa2149b1c' },
-          storage_key: { type: 'string', example: 'images/med_fa2149b1c/source.png' },
-          upload_url: { type: 'string' },
-          expires_at: { type: 'string', format: 'date-time' },
+          success: { type: 'boolean', example: true },
+          data: {
+            type: 'object',
+            properties: {
+              asset_id: { type: 'string', example: 'med_fa2149b1c' },
+              storage_key: { type: 'string', example: 'images/med_fa2149b1c/source.png' },
+              upload_url: { type: 'string' },
+              expires_at: { type: 'string', format: 'date-time' },
+            },
+          },
         },
       },
       ReferenceSyncRequest: {
@@ -119,30 +156,45 @@ export const openApiSpec: Record<string, any> = {
       CapabilitiesResponse: {
         type: 'object',
         properties: {
-          api_version: { type: 'string', example: 'v1' },
-          platform_version: { type: 'string', example: '3.8.0' },
-          processors: { type: 'object' },
-          features: { type: 'object' },
-          limits: { type: 'object' },
+          success: { type: 'boolean', example: true },
+          data: {
+            type: 'object',
+            properties: {
+              api_version: { type: 'string', example: 'v1' },
+              platform_version: { type: 'string', example: '3.8.0' },
+              processors: { type: 'object' },
+              features: { type: 'object' },
+              limits: { type: 'object' },
+            },
+          },
         },
       },
       UsageResponse: {
         type: 'object',
         properties: {
-          storage: {
+          success: { type: 'boolean', example: true },
+          data: {
             type: 'object',
             properties: {
-              usedBytes: { type: 'integer' },
-              limitBytes: { type: 'integer' },
-              usagePercent: { type: 'number' },
-            },
-          },
-          assets: {
-            type: 'object',
-            properties: {
-              totalCount: { type: 'integer' },
-              limitCount: { type: 'integer' },
-              usagePercent: { type: 'number' },
+              workspaceId: { type: 'string' },
+              storage: {
+                type: 'object',
+                properties: {
+                  usedBytes: { type: 'integer' },
+                  limitBytes: { type: 'integer' },
+                  usagePercent: { type: 'number' },
+                },
+              },
+              assets: {
+                type: 'object',
+                properties: {
+                  totalCount: { type: 'integer' },
+                  limitCount: { type: 'integer' },
+                  usagePercent: { type: 'number' },
+                  breakdown: { type: 'object' },
+                },
+              },
+              metrics: { type: 'object' },
             },
           },
         },
@@ -153,8 +205,36 @@ export const openApiSpec: Record<string, any> = {
           status: { type: 'string', enum: ['ok', 'degraded', 'failed', 'not_ready'] },
           service: { type: 'string' },
           platform_version: { type: 'string' },
+          api_version: { type: 'string' },
           timestamp: { type: 'string', format: 'date-time' },
           checks: { type: 'object' },
+        },
+      },
+      WorkerFleetResponse: {
+        type: 'object',
+        properties: {
+          success: { type: 'boolean', example: true },
+          data: {
+            type: 'object',
+            properties: {
+              total_workers: { type: 'integer' },
+              active_workers: { type: 'integer' },
+              stale_workers: { type: 'integer' },
+              workers: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    worker_id: { type: 'string' },
+                    hostname: { type: 'string' },
+                    status: { type: 'string' },
+                    last_heartbeat_at: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
         },
       },
     },
@@ -182,95 +262,138 @@ export const openApiSpec: Record<string, any> = {
   paths: {
     '/health/live': {
       get: {
+        operationId: 'getLiveness',
         summary: 'Liveness Probe',
-        description: 'Fast, dependency-free in-memory process check.',
+        description: 'Fast, dependency-free in-memory process check (<5ms).',
         security: [],
         responses: {
-          '200': { description: 'Process alive' },
+          '200': {
+            description: 'Process alive',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/HealthResponse' } } },
+          },
         },
       },
     },
     '/health/ready': {
       get: {
+        operationId: 'getReadiness',
         summary: 'Readiness Probe',
         description: 'Verifies PostgreSQL database and Object Storage connectivity.',
         security: [],
         responses: {
-          '200': { description: 'Ready to accept traffic' },
-          '503': { description: 'Service Not Ready' },
+          '200': {
+            description: 'Ready to accept traffic',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/HealthResponse' } } },
+          },
+          '503': {
+            description: 'Service Not Ready',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } },
+          },
         },
       },
     },
     '/health/deep': {
       get: {
+        operationId: 'getDeepHealth',
         summary: 'Deep Diagnostics Probe',
         description: 'Executes storage write-read-delete probe, verifies RPCs, queue depth, and worker fleet.',
         security: [{ ApiKeyAuth: ['system:read'] }],
         responses: {
-          '200': { description: 'Deep health diagnostic status' },
-          '403': { description: 'Forbidden' },
+          '200': {
+            description: 'Deep health diagnostic status',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/HealthResponse' } } },
+          },
+          '403': {
+            description: 'Forbidden',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } },
+          },
         },
       },
     },
     '/capabilities': {
       get: {
+        operationId: 'getCapabilities',
         summary: 'Platform Capabilities Discovery',
         description: 'Machine-readable runtime capabilities, engines, ladders, and limits.',
         security: [],
         responses: {
-          '200': { description: 'Capabilities payload' },
+          '200': {
+            description: 'Capabilities payload',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/CapabilitiesResponse' } } },
+          },
         },
       },
     },
     '/usage': {
       get: {
+        operationId: 'getWorkspaceUsage',
         summary: 'Workspace Usage & Quota',
         description: 'Calculates storage bytes, asset count, transforms, and quota usage.',
         security: [{ ApiKeyAuth: ['usage:read'] }],
         responses: {
-          '200': { description: 'Usage summary' },
+          '200': {
+            description: 'Usage summary',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/UsageResponse' } } },
+          },
         },
       },
     },
     '/developer/diagnostics': {
       get: {
+        operationId: 'getDeveloperDiagnostics',
         summary: 'Developer Self-Diagnostics',
         description: 'Inspects caller authentication context, scopes, and quota without leaking secrets.',
         responses: {
-          '200': { description: 'Diagnostics context' },
+          '200': {
+            description: 'Diagnostics context',
+            content: { 'application/json': { schema: { type: 'object' } } },
+          },
         },
       },
     },
     '/developer/keys': {
       get: {
+        operationId: 'listApiKeys',
         summary: 'List API Keys',
         description: 'List active and rotated API keys for the workspace.',
         responses: {
-          '200': { description: 'List of API keys' },
+          '200': {
+            description: 'List of API keys',
+            content: { 'application/json': { schema: { type: 'object' } } },
+          },
         },
       },
       post: {
+        operationId: 'createApiKey',
         summary: 'Create API Key',
         description: 'Create a new cryptographic API key. Secret returned once.',
         responses: {
-          '201': { description: 'Key created' },
+          '201': {
+            description: 'Key created',
+            content: { 'application/json': { schema: { type: 'object' } } },
+          },
         },
       },
     },
     '/developer/keys/{id}/rotate': {
       post: {
+        operationId: 'rotateApiKey',
         summary: 'Rotate API Key',
         description: 'Rotates an existing key with zero downtime using an overlapping grace period.',
         parameters: [
           { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
         ],
         responses: {
-          '200': { description: 'New key generated and old key set with expiration' },
+          '200': {
+            description: 'New key generated and old key set with expiration',
+            content: { 'application/json': { schema: { type: 'object' } } },
+          },
         },
       },
     },
     '/developer/logs': {
       get: {
+        operationId: 'listDeveloperLogs',
         summary: 'Query API Request Logs',
         description: 'Search and inspect API request logs with secrets redacted.',
         parameters: [
@@ -279,12 +402,61 @@ export const openApiSpec: Record<string, any> = {
           { name: 'request_id', in: 'query', schema: { type: 'string' } },
         ],
         responses: {
-          '200': { description: 'Filtered logs' },
+          '200': {
+            description: 'Filtered logs',
+            content: { 'application/json': { schema: { type: 'object' } } },
+          },
+        },
+      },
+    },
+    '/admin/workers': {
+      get: {
+        operationId: 'listWorkerFleet',
+        summary: 'Worker Fleet Visibility',
+        description: 'List active worker instances with heartbeats and status.',
+        security: [{ ApiKeyAuth: ['admin:manage'] }],
+        responses: {
+          '200': {
+            description: 'Fleet summary and worker listing',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/WorkerFleetResponse' } } },
+          },
+        },
+      },
+    },
+    '/uploads': {
+      post: {
+        operationId: 'uploadDirect',
+        summary: 'Direct Multipart File Upload',
+        description: 'Upload file buffer directly to DAM, computing SHA-256 and enqueuing processing.',
+        parameters: [{ $ref: '#/components/parameters/IdempotencyKeyHeader' }],
+        requestBody: {
+          required: true,
+          content: {
+            'multipart/form-data': {
+              schema: {
+                type: 'object',
+                required: ['file'],
+                properties: {
+                  file: { type: 'string', format: 'binary' },
+                  display_name: { type: 'string' },
+                  folder_id: { type: 'string' },
+                  visibility: { type: 'string', enum: ['public', 'workspace', 'private'] },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': {
+            description: 'File uploaded and asset created',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/AssetSingleResponse' } } },
+          },
         },
       },
     },
     '/uploads/presigned': {
       post: {
+        operationId: 'createPresignedUploadSession',
         summary: 'Create Presigned Upload Session',
         description: 'Initializes an upload session and provides direct upload credentials.',
         parameters: [{ $ref: '#/components/parameters/IdempotencyKeyHeader' }],
@@ -295,12 +467,16 @@ export const openApiSpec: Record<string, any> = {
           },
         },
         responses: {
-          '201': { description: 'Upload session created' },
+          '201': {
+            description: 'Upload session created',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/PresignedUploadResponse' } } },
+          },
         },
       },
     },
     '/uploads/confirm': {
       post: {
+        operationId: 'confirmUpload',
         summary: 'Confirm Upload & Enqueue Processing',
         description: 'Performs magic byte inspection, auto-quarantine, and enqueues job.',
         requestBody: {
@@ -316,86 +492,99 @@ export const openApiSpec: Record<string, any> = {
           },
         },
         responses: {
-          '200': { description: 'Upload confirmed' },
-          '400': { description: 'MIME spoof or missing storage object' },
+          '200': {
+            description: 'Upload confirmed',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/AssetSingleResponse' } } },
+          },
+          '400': {
+            description: 'MIME spoof or missing storage object',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } },
+          },
         },
       },
     },
     '/assets': {
       get: {
+        operationId: 'listAssets',
         summary: 'List Assets',
         description: 'List assets in workspace with search, filtering, and pagination.',
         responses: {
-          '200': { description: 'Asset list' },
+          '200': {
+            description: 'Asset list',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/AssetListResponse' } } },
+          },
         },
       },
     },
     '/assets/{id}': {
       get: {
+        operationId: 'getAsset',
         summary: 'Get Asset Metadata',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
-          '200': { description: 'Asset record' },
+          '200': {
+            description: 'Asset record',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/AssetSingleResponse' } } },
+          },
         },
       },
       patch: {
+        operationId: 'updateAsset',
         summary: 'Update Asset Metadata',
         description: 'Update display name, description, tags, focal point. Rejects immutable fields.',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
-          '200': { description: 'Asset updated' },
-          '400': { description: 'IMMUTABLE_FIELD_MUTATION' },
+          '200': {
+            description: 'Asset updated',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/AssetSingleResponse' } } },
+          },
+          '400': {
+            description: 'IMMUTABLE_FIELD_MUTATION',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } },
+          },
         },
       },
       delete: {
+        operationId: 'deleteAsset',
         summary: 'Delete or Purge Asset',
-        description: 'Trash asset or permanently purge. Blocked with 409 ASSET_IN_USE if referenced.',
+        description: 'Soft delete to trash or force purge. Protected by active reference sync locks.',
         parameters: [
           { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
           { name: 'action', in: 'query', schema: { type: 'string', enum: ['trash', 'purge'] } },
           { name: 'force', in: 'query', schema: { type: 'boolean' } },
         ],
         responses: {
-          '200': { description: 'Asset deleted or purged' },
-          '409': { description: 'ASSET_IN_USE' },
+          '200': {
+            description: 'Asset deleted or moved to trash',
+            content: { 'application/json': { schema: { type: 'object' } } },
+          },
+          '409': {
+            description: 'ASSET_IN_USE - Active references exist',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } },
+          },
         },
       },
     },
-    '/delivery/{id}': {
-      get: {
-        summary: 'Media Delivery & On-Demand Transform',
-        description: 'Delivers canonical variants or dynamically transformed WebP/AVIF with deterministic cache.',
-        parameters: [
-          { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
-          { name: 'w', in: 'query', schema: { type: 'integer' }, description: 'Width <= 4096' },
-          { name: 'h', in: 'query', schema: { type: 'integer' }, description: 'Height <= 4096' },
-          { name: 'q', in: 'query', schema: { type: 'integer' } },
-          { name: 'format', in: 'query', schema: { type: 'string', enum: ['webp', 'png', 'jpeg', 'avif'] } },
-        ],
-        responses: {
-          '200': { description: 'Binary media stream' },
-          '304': { description: 'Not Modified' },
-          '400': { description: 'IMAGE_DIMENSION_LIMIT_EXCEEDED' },
-          '403': { description: 'Forbidden (private or quarantined)' },
-        },
-      },
-    },
-    '/delivery/video/{id}/master.m3u8': {
-      get: {
-        summary: 'Adaptive HLS Master Playlist',
-        description: 'Delivers standardized HLS master playlist with multi-bitrate 30fps ladders.',
+    '/assets/{id}/references': {
+      post: {
+        operationId: 'attachReference',
+        summary: 'Register Asset Reference',
+        description: 'Registers external application entity reference to prevent accidental deletion.',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
-          '200': { description: 'HLS Master Playlist' },
-          '425': { description: 'TOO_EARLY (Transcoding in progress)' },
-          '503': { description: 'MEDIA_ARTIFACT_MISSING' },
+          '200': {
+            description: 'Reference registered',
+            content: { 'application/json': { schema: { type: 'object' } } },
+          },
         },
       },
     },
     '/references/sync': {
       post: {
-        summary: 'Transactional Reference Sync',
-        description: 'Atomically syncs consumer entity references (Safe Delete).',
+        operationId: 'syncReferences',
+        summary: 'Atomic Reference Sync',
+        description: 'Atomically synchronizes all entity references for an external resource.',
+        parameters: [{ $ref: '#/components/parameters/IdempotencyKeyHeader' }],
         requestBody: {
           required: true,
           content: {
@@ -403,41 +592,47 @@ export const openApiSpec: Record<string, any> = {
           },
         },
         responses: {
-          '200': { description: 'References synchronized' },
-        },
-      },
-    },
-    '/webhooks': {
-      get: {
-        summary: 'List Webhook Endpoints',
-        responses: {
-          '200': { description: 'Endpoints list' },
-        },
-      },
-      post: {
-        summary: 'Register Webhook Endpoint',
-        responses: {
-          '201': { description: 'Endpoint registered with HMAC signing secret' },
+          '200': {
+            description: 'References synchronized atomically',
+            content: { 'application/json': { schema: { type: 'object' } } },
+          },
         },
       },
     },
     '/webhooks/deliveries/{id}/replay': {
       post: {
-        summary: 'Replay Webhook Delivery',
-        description: 'Re-dispatches a delivery attempt with historical immutability.',
+        operationId: 'replayWebhookDelivery',
+        summary: 'Safe Webhook Replay',
+        description: 'Replays a past webhook delivery with immutable audit retention.',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
-          '200': { description: 'New delivery attempt created' },
+          '200': {
+            description: 'Delivery replayed',
+            content: { 'application/json': { schema: { type: 'object' } } },
+          },
         },
       },
     },
-    '/admin/workers': {
+    '/delivery/{id}': {
       get: {
-        summary: 'List Worker Fleet (Admin)',
-        description: 'Inspects distributed compute fleet, heartbeats, and status.',
-        security: [{ ApiKeyAuth: ['system:read'] }],
+        operationId: 'deliverAsset',
+        summary: 'Universal Delivery Gateway',
+        description: 'Dynamic on-the-fly transformation with AVIF/WebP auto-negotiation and CDN caching.',
+        security: [],
+        parameters: [
+          { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'w', in: 'query', schema: { type: 'integer' } },
+          { name: 'h', in: 'query', schema: { type: 'integer' } },
+          { name: 'format', in: 'query', schema: { type: 'string', enum: ['webp', 'avif', 'jpeg', 'png'] } },
+          { name: 'q', in: 'query', schema: { type: 'integer' } },
+          { name: 'fit', in: 'query', schema: { type: 'string', enum: ['cover', 'contain', 'inside', 'outside', 'smart'] } },
+        ],
         responses: {
-          '200': { description: 'Fleet status list' },
+          '200': { description: 'Optimized binary image or file stream' },
+          '304': { description: 'Not Modified (Conditional Cache Hit)' },
+          '400': { description: 'IMAGE_DIMENSION_LIMIT_EXCEEDED or DECOMPRESSION_BOMB_PREVENTED' },
+          '403': { description: 'ASSET_QUARANTINED or PERMISSION_DENIED' },
+          '404': { description: 'ASSET_NOT_FOUND' },
         },
       },
     },

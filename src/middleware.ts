@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { SESSION_COOKIE_NAME, verifySessionToken } from '@/lib/auth/session';
+import { handleCorsPreflight, applyCorsHeaders } from '@/lib/security/cors';
 
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
@@ -27,22 +28,8 @@ export async function middleware(req: NextRequest) {
       ? rawReqId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64)
       : `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
-    const origin = req.headers.get('origin') || '*';
-
     if (req.method === 'OPTIONS') {
-      return new NextResponse(null, {
-        status: 204,
-        headers: {
-          'Access-Control-Allow-Origin': origin,
-          'Access-Control-Allow-Credentials': 'true',
-          'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
-          'Access-Control-Allow-Headers':
-            'Content-Type, Authorization, X-Media-Api-Key, X-Workspace-Id, X-Request-Id, Idempotency-Key, Cache-Control',
-          'Access-Control-Expose-Headers':
-            'X-Request-Id, RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset, Retry-After',
-          'Access-Control-Max-Age': '86400',
-        },
-      });
+      return handleCorsPreflight(req);
     }
 
     const requestHeaders = new Headers(req.headers);
@@ -55,7 +42,11 @@ export async function middleware(req: NextRequest) {
     });
 
     response.headers.set('X-Request-Id', sanitizedReqId);
-    response.headers.set('Access-Control-Expose-Headers', 'X-Request-Id, RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset, Retry-After');
+    response.headers.set(
+      'Access-Control-Expose-Headers',
+      'X-Request-Id, RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset, Retry-After'
+    );
+    applyCorsHeaders(response, req);
     return response;
   }
 

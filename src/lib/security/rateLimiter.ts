@@ -21,27 +21,48 @@ const ROUTE_CLASS_LIMITS: Record<RouteClass, number> = {
 
 const WINDOW_SECONDS = 60;
 
-// In-memory fallback bucket store for development/testing
+// In-memory fallback bucket store for testing or offline environments
 const memoryBuckets = new Map<string, { tokens: number; resetAt: number }>();
 
 export const rateLimiter = {
   /**
-   * Determine route class from HTTP method and URL pathname
+   * Determine route class from HTTP method and URL/pathname/searchParams
    */
-  classifyRoute(method: string, pathname: string): RouteClass {
-    const m = method.toUpperCase();
-    if (pathname.includes('/uploads/')) return 'upload';
-    if (pathname.includes('/delivery/') && (pathname.includes('w=') || pathname.includes('format='))) {
+  classifyRoute(
+    method: string,
+    urlOrPathname: string,
+    searchParams?: URLSearchParams | Record<string, string>
+  ): RouteClass {
+    let pathname = urlOrPathname;
+    let query = '';
+    if (urlOrPathname.includes('?')) {
+      const parts = urlOrPathname.split('?');
+      pathname = parts[0];
+      query = parts[1];
+    }
+
+    const hasTransform =
+      (searchParams &&
+        (searchParams instanceof URLSearchParams
+          ? searchParams.has('w') || searchParams.has('format') || searchParams.has('h') || searchParams.has('q')
+          : 'w' in searchParams || 'format' in searchParams || 'h' in searchParams || 'q' in searchParams)) ||
+      query.includes('w=') ||
+      query.includes('format=');
+
+    if (pathname.includes('/uploads')) return 'upload';
+    if (pathname.includes('/delivery/') && hasTransform) {
       return 'expensive_transform';
     }
     if (pathname.startsWith('/api/v1/admin/')) return 'admin';
+    const m = method.toUpperCase();
     if (m === 'GET' || m === 'HEAD') return 'read';
     if (m === 'POST' || m === 'PUT' || m === 'PATCH' || m === 'DELETE') return 'write';
     return 'default';
   },
 
   /**
-   * Check and consume rate limit for a caller identifier (API Key ID, IP, or Workspace ID)
+   * Check and atomically consume rate limit for a caller identifier (API Key ID, IP, or Workspace ID)
+   * Uses PostgreSQL row-locked RPC consume_rate_limit_token for distributed concurrency safety.
    */
   async checkRateLimit(
     identifier: string,
@@ -52,8 +73,8 @@ export const rateLimiter = {
     const now = Date.now();
     const windowMs = WINDOW_SECONDS * 1000;
 
-    // Fast In-Memory Check for testing & local development
-    if (!isSupabaseAdminConfigured() || process.env.NODE_ENV === 'test') {
+    // Fast atomic in-memory check for offline/testing mode
+    if (!isSupabaseAdminConfigured()) {
       let bucket = memoryBuckets.get(bucketKey);
       if (!bucket || now >= bucket.resetAt) {
         bucket = { tokens: limit - 1, resetAt: now + windowMs };
@@ -87,67 +108,62 @@ export const rateLimiter = {
       };
     }
 
-    // Distributed PostgreSQL-backed bucket storage
-    try {
-      const resetDate = new Date(now + windowMs);
-      const { data, error } = await supabaseAdmin
-        .from('rate_limit_buckets')
-        .select('*')
-        .eq('key', bucketKey)
-        .maybeSingle();
-
-      if (error || !data) {
-        // Create new bucket
-        await supabaseAdmin.from('rate_limit_buckets').upsert({
-          key: bucketKey,
-          tokens_remaining: limit - 1,
-          last_refill_at: new Date().toISOString(),
-          expires_at: resetDate.toISOString(),
+    // Distributed atomic PostgreSQL RPC execution with row-level locks
+    let lastError: any = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const { data, error } = await supabaseAdmin.rpc('consume_rate_limit_token', {
+          p_key: bucketKey,
+          p_limit: limit,
+          p_window_seconds: WINDOW_SECONDS,
         });
+
+        if (error || !data) {
+          throw error || new Error('No data returned from consume_rate_limit_token');
+        }
+
+        return {
+          allowed: Boolean(data.allowed),
+          limit: Number(data.limit) || limit,
+          remaining: Number(data.remaining) || 0,
+          resetSeconds: Number(data.reset_seconds) || WINDOW_SECONDS,
+          retryAfterSeconds: data.retry_after_seconds ? Number(data.retry_after_seconds) : undefined,
+        };
+      } catch (err: any) {
+        lastError = err;
+        if (attempt < 2 && (err.message?.includes('fetch') || err.code === 'ECONNRESET' || err.name === 'TypeError')) {
+          await new Promise((resolve) => setTimeout(resolve, 35 * (attempt + 1)));
+          continue;
+        }
+        break;
+      }
+    }
+
+    console.warn('[RateLimiter] Database RPC error, falling back to memory bucket:', lastError?.message);
+    // Fallback to in-memory bucket to prevent complete lockout while remaining resilient
+      let bucket = memoryBuckets.get(bucketKey);
+      if (!bucket || now >= bucket.resetAt) {
+        bucket = { tokens: limit - 1, resetAt: now + windowMs };
+        memoryBuckets.set(bucketKey, bucket);
         return {
           allowed: true,
           limit,
-          remaining: limit - 1,
-          resetSeconds: WINDOW_SECONDS,
+          remaining: bucket.tokens,
+          resetSeconds: Math.ceil(windowMs / 1000),
         };
       }
 
-      const expiresAt = new Date(data.expires_at).getTime();
-      if (now >= expiresAt) {
-        // Window expired, reset tokens
-        await supabaseAdmin
-          .from('rate_limit_buckets')
-          .update({
-            tokens_remaining: limit - 1,
-            last_refill_at: new Date().toISOString(),
-            expires_at: resetDate.toISOString(),
-          })
-          .eq('key', bucketKey);
+      if (bucket.tokens > 0) {
+        bucket.tokens -= 1;
         return {
           allowed: true,
           limit,
-          remaining: limit - 1,
-          resetSeconds: WINDOW_SECONDS,
+          remaining: bucket.tokens,
+          resetSeconds: Math.max(1, Math.ceil((bucket.resetAt - now) / 1000)),
         };
       }
 
-      if (data.tokens_remaining > 0) {
-        const nextTokens = data.tokens_remaining - 1;
-        await supabaseAdmin
-          .from('rate_limit_buckets')
-          .update({ tokens_remaining: nextTokens })
-          .eq('key', bucketKey);
-        const resetSeconds = Math.max(1, Math.ceil((expiresAt - now) / 1000));
-        return {
-          allowed: true,
-          limit,
-          remaining: nextTokens,
-          resetSeconds,
-        };
-      }
-
-      // Exhausted
-      const retryAfter = Math.max(1, Math.ceil((expiresAt - now) / 1000));
+      const retryAfter = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
       return {
         allowed: false,
         limit,
@@ -155,16 +171,7 @@ export const rateLimiter = {
         resetSeconds: retryAfter,
         retryAfterSeconds: retryAfter,
       };
-    } catch (err: any) {
-      console.warn('[RateLimiter] Database bucket error, fail open for reliability:', err.message);
-      return {
-        allowed: true,
-        limit,
-        remaining: limit,
-        resetSeconds: WINDOW_SECONDS,
-      };
-    }
-  },
+    },
 
   getHeaders(result: RateLimitResult): Record<string, string> {
     const headers: Record<string, string> = {

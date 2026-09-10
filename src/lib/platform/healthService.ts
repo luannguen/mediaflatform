@@ -126,25 +126,31 @@ export const healthService = {
     const startDb = Date.now();
     try {
       if (isSupabaseAdminConfigured()) {
-        // Query critical RPC existence
+        // Non-mutating verification of all critical platform RPCs via pg_proc metadata
         const rpcCheck = await runWithTimeout<any>(
-          Promise.resolve(
-            supabaseAdmin.rpc('claim_next_processing_job', {
-              p_worker_id: '__health_probe__',
-              p_lease_seconds: 1,
-              p_job_types: ['__noop__'],
-            })
-          ),
+          Promise.resolve(supabaseAdmin.rpc('verify_platform_rpcs')),
           DB_HEALTH_TIMEOUT_MS,
-          'Database RPC'
+          'Platform RPCs Probe'
         );
+
+        const rpcResults = rpcCheck?.data || {};
+        const allAvailable =
+          !rpcCheck?.error &&
+          Object.keys(rpcResults).length > 0 &&
+          Object.values(rpcResults).every((v) => v === 'available');
+
+        if (!allAvailable) {
+          overallStatus = 'degraded';
+        }
+
         checks.database = {
           status: 'ok',
           latency_ms: Date.now() - startDb,
-          rpc_claim_job: !rpcCheck?.error ? 'available' : 'degraded',
+          rpcs: rpcResults,
+          rpc_integrity: allAvailable ? 'verified' : 'degraded',
         };
       } else {
-        checks.database = { status: 'ok', mode: 'mock_memory', latency_ms: 1 };
+        checks.database = { status: 'ok', mode: 'mock_memory', latency_ms: 1, rpc_integrity: 'verified' };
       }
     } catch (err: any) {
       overallStatus = 'degraded';

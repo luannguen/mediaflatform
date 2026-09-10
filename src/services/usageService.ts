@@ -55,8 +55,8 @@ export const usageService = {
         else if (a.asset_type === 'archive') breakdown.archives += 1;
         else breakdown.other += 1;
       }
-      apiRequests = mockDb.usageMetrics.length;
-      webhookDeliveries = mockDb.webhookDeliveries.length;
+      const wsEndpointIds = (mockDb.webhookEndpoints || []).filter((ep) => ep.workspace_id === workspaceId).map((ep) => ep.id);
+      webhookDeliveries = (mockDb.webhookDeliveries || []).filter((d) => wsEndpointIds.includes(d.webhook_endpoint_id)).length;
     } else {
       // Query workspace quota
       const { data: ws } = await supabaseAdmin
@@ -122,11 +122,22 @@ export const usageService = {
         }
       }
 
-      // Query webhook deliveries
-      const { count: whCount } = await supabaseAdmin
-        .from('webhook_deliveries')
-        .select('*', { count: 'exact', head: true });
-      webhookDeliveries = whCount || 0;
+      // Query webhook deliveries strictly scoped to workspace's endpoints
+      const { data: wsEndpoints } = await supabaseAdmin
+        .from('webhook_endpoints')
+        .select('id')
+        .eq('workspace_id', workspaceId);
+
+      const endpointIds = (wsEndpoints || []).map((e: { id: string }) => e.id);
+      if (endpointIds.length > 0) {
+        const { count: whCount } = await supabaseAdmin
+          .from('webhook_deliveries')
+          .select('*', { count: 'exact', head: true })
+          .in('webhook_endpoint_id', endpointIds);
+        webhookDeliveries = whCount || 0;
+      } else {
+        webhookDeliveries = 0;
+      }
     }
 
     const storageUsagePercent =

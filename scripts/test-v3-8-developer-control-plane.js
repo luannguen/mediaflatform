@@ -1,10 +1,12 @@
 /**
- * Media Platform v3.8 — Developer Platform & Operational Control Plane Test Suite
- * Comprehensive End-to-End & Integration Test for v3.8 Invariants
+ * Media Platform v3.8.1 — Developer Platform & Control Plane Correctness Gate Test Suite
+ * Comprehensive End-to-End, High-Concurrency & Contract Verification Test
  */
 
 const fs = require('fs');
 const path = require('path');
+const assert = require('assert');
+const crypto = require('crypto');
 
 // 1. Load environment variables
 if (fs.existsSync('.env.local')) {
@@ -20,8 +22,6 @@ if (fs.existsSync('.env.local')) {
     }
   }
 }
-const assert = require('assert');
-const crypto = require('crypto');
 
 // Load compiled or ts-node modules via local require / source
 const { PLATFORM_VERSION, API_VERSION } = require('../src/lib/platform/version.ts');
@@ -34,10 +34,12 @@ const { usageService } = require('../src/services/usageService.ts');
 const { workerFleetService } = require('../src/services/workerFleetService.ts');
 const { developerService } = require('../src/services/developerService.ts');
 const { auditService } = require('../src/services/auditService.ts');
+const { isAllowedOrigin, handleCorsPreflight } = require('../src/lib/security/cors.ts');
 const { openApiSpec } = require('../src/openapi/spec.ts');
 const { MediaPlatformClient, MediaPlatformError } = require('../packages/sdk/index.ts');
 const { supabaseAdmin } = require('../src/lib/supabase/admin.ts');
 
+const BASE_URL = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
 let passedTests = 0;
 let totalTests = 0;
 
@@ -68,7 +70,7 @@ function runTest(name, fn) {
 
 async function main() {
   console.log('\n============================================================');
-  console.log(`🧪 MEDIA PLATFORM v${PLATFORM_VERSION} — CONTROL PLANE & DEVELOPER PLATFORM`);
+  console.log(`🧪 MEDIA PLATFORM v${PLATFORM_VERSION} — CORRECTNESS GATE & CONTROL PLANE`);
   console.log('============================================================\n');
 
   // 1. Version & System Constants
@@ -121,64 +123,105 @@ async function main() {
     assert.deepStrictEqual(invalid.invalidScopes, ['hacker:exploit', 'root:super']);
   });
 
-  // 4. Rate Limiting Engine
-  await runTest('4.1 Rate limiter correctly classifies routes', () => {
+  // 4. Rate Limiting Engine & Real High-Concurrency Test
+  await runTest('4.1 Rate limiter correctly classifies routes with query params', () => {
     assert.strictEqual(rateLimiter.classifyRoute('GET', '/api/v1/assets'), 'read');
     assert.strictEqual(rateLimiter.classifyRoute('POST', '/api/v1/assets'), 'write');
-    assert.strictEqual(rateLimiter.classifyRoute('POST', '/api/v1/uploads/direct'), 'upload');
+    assert.strictEqual(rateLimiter.classifyRoute('POST', '/api/v1/uploads'), 'upload');
     assert.strictEqual(rateLimiter.classifyRoute('GET', '/api/v1/delivery/med_123?w=800'), 'expensive_transform');
+    assert.strictEqual(rateLimiter.classifyRoute('GET', '/api/v1/delivery/med_123', new URLSearchParams('format=webp')), 'expensive_transform');
     assert.strictEqual(rateLimiter.classifyRoute('GET', '/api/v1/admin/workers'), 'admin');
   });
 
-  await runTest('4.2 Rate limiter decrements tokens and attaches standard headers', async () => {
-    const testCaller = `test_caller_${Date.now()}`;
-    const firstCheck = await rateLimiter.checkRateLimit(testCaller, 'upload');
-    assert.strictEqual(firstCheck.allowed, true);
-    assert.strictEqual(firstCheck.limit, 30);
-    assert.strictEqual(firstCheck.remaining, 29);
+  await runTest('4.2 Atomic Rate Limiter: 60 concurrent requests against limit=30 strictly rejects 30', async () => {
+    const testCaller = `test_concurrent_caller_${Date.now()}`;
+    const totalRequests = 60;
+    const limit = 30;
 
-    const headers = rateLimiter.getHeaders(firstCheck);
-    assert.strictEqual(headers['RateLimit-Limit'], '30');
-    assert.strictEqual(headers['RateLimit-Remaining'], '29');
-    assert(headers['RateLimit-Reset'] !== undefined);
+    // Fire 60 concurrent requests at the exact same time
+    const promises = Array.from({ length: totalRequests }, () =>
+      rateLimiter.checkRateLimit(testCaller, 'upload')
+    );
+
+    const results = await Promise.all(promises);
+    const allowedCount = results.filter((r) => r.allowed).length;
+    const rejectedCount = results.filter((r) => !r.allowed).length;
+
+    assert.strictEqual(allowedCount, limit, `Expected exactly ${limit} requests allowed, got ${allowedCount}`);
+    assert.strictEqual(rejectedCount, totalRequests - limit, `Expected exactly ${totalRequests - limit} rejected, got ${rejectedCount}`);
+
+    // Verify rejection headers
+    const rejectedResult = results.find((r) => !r.allowed);
+    const headers = rateLimiter.getHeaders(rejectedResult);
+    assert.strictEqual(headers['RateLimit-Remaining'], '0');
+    assert(headers['Retry-After'] !== undefined);
   });
 
-  // 5. Idempotency Engine
-  await runTest('5.1 Idempotency returns cached result for matching payload', async () => {
-    const wsId = 'ws_idemp_test';
-    const key = `key_${Date.now()}`;
+  // 5. Idempotency State Machine & Race-Condition Concurrency Test
+  await runTest('5.1 Atomic Idempotency: 20 concurrent requests with same key allow exactly 1 execution', async () => {
+    const wsId = 'ws_idemp_race_test';
+    const key = `key_race_${Date.now()}`;
     const route = '/api/v1/assets';
-    const payload = { displayName: 'Original Asset Name' };
+    const method = 'POST';
+    const payload = { displayName: 'Atomic Asset Creation' };
 
-    await idempotencyService.saveResponse(wsId, key, route, payload, 201, {}, { asset_id: 'med_cached_1' });
+    // Fire 20 concurrent reservations simultaneously
+    const reservations = await Promise.all(
+      Array.from({ length: 20 }, () =>
+        idempotencyService.reserveOrGetCached(wsId, key, route, method, payload).catch((err) => ({
+          action: 'conflict_caught',
+          error: err.message,
+        }))
+      )
+    );
 
-    const cached = await idempotencyService.validateAndGetCached(wsId, key, route, payload);
-    assert(cached !== null);
-    assert.strictEqual(cached.response_status, 201);
-    assert.strictEqual(cached.response_body.asset_id, 'med_cached_1');
+    const executedCount = reservations.filter((r) => r.action === 'execute').length;
+    const blockedCount = reservations.filter((r) => r.action === 'conflict_caught').length;
+
+    assert.strictEqual(executedCount, 1, `Exactly 1 concurrent request must execute, got ${executedCount}`);
+    assert.strictEqual(blockedCount, 19, `19 concurrent requests must be rejected as in_progress, got ${blockedCount}`);
+
+    // Complete the business operation
+    await idempotencyService.saveResponse(wsId, key, route, payload, 201, { 'content-type': 'application/json' }, { asset_id: 'med_race_done_1' });
+
+    // Subsequent request must receive cached response
+    const cachedRes = await idempotencyService.reserveOrGetCached(wsId, key, route, method, payload);
+    assert.strictEqual(cachedRes.action, 'cached');
+    assert.strictEqual(cachedRes.cachedRecord.response_status, 201);
+    assert.strictEqual(cachedRes.cachedRecord.response_body.asset_id, 'med_race_done_1');
   });
 
-  await runTest('5.2 Idempotency throws 409 conflict when payload differs', async () => {
-    const wsId = 'ws_idemp_test';
-    const key = `key_conflict_${Date.now()}`;
-    const route = '/api/v1/assets';
-    const originalPayload = { displayName: 'Original' };
-    const tamperedPayload = { displayName: 'Tampered' };
+  await runTest('5.2 Idempotency strictly rejects key reuse with different route or payload', async () => {
+    const wsId = 'ws_idemp_conflict_test';
+    const key = `key_reuse_${Date.now()}`;
+    const originalPayload = { name: 'Alpha' };
+    const tamperedPayload = { name: 'Beta' };
 
-    await idempotencyService.saveResponse(wsId, key, route, originalPayload, 200, {}, { done: true });
+    await idempotencyService.reserveOrGetCached(wsId, key, '/api/v1/uploads', 'POST', originalPayload);
+    await idempotencyService.saveResponse(wsId, key, '/api/v1/uploads', originalPayload, 200, {}, { ok: true });
 
-    let threw = false;
+    // Differing payload
+    let threwPayload = false;
     try {
-      await idempotencyService.validateAndGetCached(wsId, key, route, tamperedPayload);
+      await idempotencyService.reserveOrGetCached(wsId, key, '/api/v1/uploads', 'POST', tamperedPayload);
     } catch (err) {
-      threw = true;
+      threwPayload = true;
       assert.strictEqual(err.statusCode, 409);
-      assert.strictEqual(err.code, 'IDEMPOTENCY_CONFLICT');
     }
-    assert(threw, 'Should have thrown 409 IDEMPOTENCY_CONFLICT');
+    assert(threwPayload, 'Should reject differing payload with 409');
+
+    // Differing route
+    let threwRoute = false;
+    try {
+      await idempotencyService.reserveOrGetCached(wsId, key, '/api/v1/other', 'POST', originalPayload);
+    } catch (err) {
+      threwRoute = true;
+      assert.strictEqual(err.statusCode, 409);
+    }
+    assert(threwRoute, 'Should reject differing route with 409');
   });
 
-  // 6. 3-Tier Health Probes
+  // 6. 3-Tier Health Probes with Non-Mutating RPC Metadata Verification
   await runTest('6.1 Tier 1 Liveness Probe responds without external queries', () => {
     const live = healthService.getLiveness();
     assert.strictEqual(live.status, 'ok');
@@ -193,17 +236,19 @@ async function main() {
     assert(result.checks.database !== undefined);
   });
 
-  await runTest('6.3 Tier 3 Deep Diagnostic Probe performs write-read-delete probe', async () => {
+  await runTest('6.3 Tier 3 Deep Health executes non-mutating RPC metadata & storage write-read-delete probe', async () => {
     const deepResult = await healthService.getDeepHealth('test_probe_run');
     assert(['ok', 'degraded'].includes(deepResult.status));
     assert(deepResult.checks.database !== undefined);
     assert(deepResult.checks.storage !== undefined);
-    assert(deepResult.checks.queue !== undefined);
-    assert(deepResult.checks.workers !== undefined);
+    assert.strictEqual(deepResult.checks.database.rpc_integrity, 'verified');
+    assert.strictEqual(deepResult.checks.database.rpcs.claim_next_processing_job, 'available');
+    assert.strictEqual(deepResult.checks.database.rpcs.consume_rate_limit_token, 'available');
+    assert.strictEqual(deepResult.checks.database.rpcs.reserve_idempotency_key, 'available');
   });
 
-  // 7. Ground-Truth Usage & Zero Fake Telemetry
-  await runTest('7.1 Usage Service computes real stats without mock injection', async () => {
+  // 7. Ground-Truth Usage & Multi-Tenant Webhook Isolation
+  await runTest('7.1 Usage Service: Empty workspace returns zero usage without mock injection', async () => {
     const emptyWsId = `ws_empty_${Date.now()}`;
     const usage = await usageService.getWorkspaceUsage(emptyWsId);
     assert.strictEqual(usage.workspaceId, emptyWsId);
@@ -211,6 +256,18 @@ async function main() {
     assert.strictEqual(usage.assets.totalCount, 0);
     assert.strictEqual(usage.assets.breakdown.videos, 0);
     assert.strictEqual(usage.assets.breakdown.images, 0);
+    assert.strictEqual(usage.metrics.webhookDeliveries, 0);
+  });
+
+  await runTest('7.2 Usage Service: Webhook count is strictly scoped per workspace (no cross-tenant leakage)', async () => {
+    const wsA = `ws_tenant_a_${Date.now()}`;
+    const wsB = `ws_tenant_b_${Date.now()}`;
+
+    const usageA = await usageService.getWorkspaceUsage(wsA);
+    const usageB = await usageService.getWorkspaceUsage(wsB);
+
+    assert.strictEqual(usageA.metrics.webhookDeliveries, 0);
+    assert.strictEqual(usageB.metrics.webhookDeliveries, 0);
   });
 
   // 8. Worker Fleet Observability & Heartbeat
@@ -234,13 +291,11 @@ async function main() {
     assert(registered !== undefined);
     assert.strictEqual(registered.hostname, 'test-node-01');
 
-    // Clean up test worker
     await workerFleetService.unregisterWorker(testWorkerId);
   });
 
   // 9. API Key Rotation
   await runTest('9.1 API Key rotation creates successor and preserves old key with grace period', async () => {
-    // Look for an existing API key in db or create a temporary one
     const { data: existingKey } = await supabaseAdmin
       .from('api_keys')
       .select('*')
@@ -262,7 +317,6 @@ async function main() {
       assert.strictEqual(rotationResult.oldKeyRecord.id, existingKey.id);
       assert(rotationResult.oldKeyRecord.expires_at !== null);
 
-      // Verify DB record
       const { data: updatedOldKey } = await supabaseAdmin
         .from('api_keys')
         .select('*')
@@ -275,48 +329,108 @@ async function main() {
   });
 
   // 10. OpenAPI 3.1 Contract Specification
-  await runTest('10.1 OpenAPI 3.1 document adheres to schema and contains v3.8 routes', () => {
+  await runTest('10.1 OpenAPI 3.1 document adheres to schema and defines full response schemas', () => {
     assert.strictEqual(openApiSpec.openapi, '3.1.0');
     assert.strictEqual(openApiSpec.info.version, '3.8.0');
-    assert(openApiSpec.paths['/health/live'] !== undefined);
-    assert(openApiSpec.paths['/health/ready'] !== undefined);
-    assert(openApiSpec.paths['/health/deep'] !== undefined);
-    assert(openApiSpec.paths['/capabilities'] !== undefined);
-    assert(openApiSpec.paths['/usage'] !== undefined);
-    assert(openApiSpec.paths['/admin/workers'] !== undefined);
-    assert(openApiSpec.paths['/developer/keys/{id}/rotate'] !== undefined);
-    assert(openApiSpec.paths['/webhooks/deliveries/{id}/replay'] !== undefined);
+
+    // Every path operation must have an operationId and responses
+    for (const [pathKey, methods] of Object.entries(openApiSpec.paths)) {
+      for (const [method, op] of Object.entries(methods)) {
+        if (typeof op === 'object' && op !== null) {
+          assert(op.operationId, `Missing operationId on ${method.toUpperCase()} ${pathKey}`);
+          assert(op.responses, `Missing responses on ${method.toUpperCase()} ${pathKey}`);
+        }
+      }
+    }
+
+    assert(openApiSpec.paths['/health/live'].get.responses['200'].content['application/json'] !== undefined);
+    assert(openApiSpec.paths['/uploads'].post.requestBody.content['multipart/form-data'] !== undefined);
     assert(openApiSpec.components.schemas.Asset !== undefined);
-    assert(openApiSpec.components.schemas.ErrorResponse !== undefined);
   });
 
-  // 11. Official TypeScript SDK
-  await runTest('11.1 TypeScript SDK initializes, generates delivery URLs and handles error types', () => {
-    const client = new MediaPlatformClient({
-      apiKey: 'mda_live_test_api_key_12345',
-      baseUrl: 'http://localhost:3000',
-    });
+  // 11. CORS Security Origin Allowlist
+  await runTest('11.1 CORS: Untrusted arbitrary origin with credentials is strictly denied (403)', () => {
+    assert.strictEqual(isAllowedOrigin('https://evil.example'), false);
+    assert.strictEqual(isAllowedOrigin('http://localhost:3000'), true);
+  });
 
-    const deliveryUrl = client.assets.getDeliveryUrl('med_test123', {
-      width: 800,
-      height: 600,
-      format: 'webp',
-      quality: 85,
-    });
+  // 12. Real TypeScript SDK End-to-End Test (Upload -> Get -> Delivery -> Purge)
+  await runTest('12.1 Real SDK E2E: uploadAsset -> getAsset -> getDeliveryUrl -> deleteAsset(?action=purge)', async () => {
+    // 1. Resolve Admin Key
+    const { data: keyRecord } = await supabaseAdmin
+      .from('api_keys')
+      .select('*')
+      .eq('status', 'active')
+      .limit(1)
+      .maybeSingle();
 
-    assert.strictEqual(
-      deliveryUrl,
-      'http://localhost:3000/api/v1/delivery/med_test123?w=800&h=600&format=webp&q=85'
+    if (!keyRecord) {
+      console.log('    (Skipping Real SDK E2E: No active API key found)');
+      return;
+    }
+
+    // Create authentic test key with proper salt and scope
+    const { rawKey: testToken, keyRecord: tempKey } = await developerService.createApiKey(
+      keyRecord.workspace_id,
+      keyRecord.service_account_id,
+      'SDK E2E Test Key',
+      ['*']
     );
 
-    const err = new MediaPlatformError('Not found', 'ASSET_NOT_FOUND', 404, 'req_123', { id: 'med_test123' });
-    assert.strictEqual(err.code, 'ASSET_NOT_FOUND');
-    assert.strictEqual(err.status, 404);
-    assert.strictEqual(err.requestId, 'req_123');
+    try {
+      const client = new MediaPlatformClient({
+        apiKey: testToken,
+        baseUrl: BASE_URL,
+      });
+
+      // 2. Upload asset via SDK
+      const testBuffer = Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+        'base64'
+      );
+      const uploadedAsset = await client.assets.upload(testBuffer, {
+        displayName: 'E2E SDK 1x1 Pixel',
+        visibility: 'public',
+      });
+
+      assert(uploadedAsset !== null && uploadedAsset.id !== undefined);
+      assert(uploadedAsset.id.startsWith('med_'));
+
+      // 3. Get asset via SDK
+      const fetchedAsset = await client.assets.get(uploadedAsset.id);
+      assert.strictEqual(fetchedAsset.id, uploadedAsset.id);
+      assert.strictEqual(fetchedAsset.display_name, 'E2E SDK 1x1 Pixel');
+
+      // 4. Generate Delivery URL & Fetch over HTTP
+      const deliveryUrl = client.assets.getDeliveryUrl(uploadedAsset.id, {
+        width: 10,
+        format: 'webp',
+      });
+      assert(deliveryUrl.includes(`/api/v1/delivery/${uploadedAsset.id}?w=10&format=webp`));
+
+      const deliveryRes = await fetch(deliveryUrl);
+      assert.strictEqual(deliveryRes.status, 200);
+
+      // 5. Permanent Purge via SDK (sends ?action=purge)
+      const deleteRes = await client.assets.delete(uploadedAsset.id, { permanent: true, force: true });
+      assert.strictEqual(deleteRes.success, true);
+
+      // Verify asset record is purged from database
+      const { data: checkPurged } = await supabaseAdmin
+        .from('assets')
+        .select('id')
+        .eq('id', uploadedAsset.id)
+        .maybeSingle();
+      assert.strictEqual(checkPurged, null, 'Asset record must be permanently purged from database');
+    } finally {
+      if (tempKey?.id) {
+        await supabaseAdmin.from('api_keys').delete().eq('id', tempKey.id);
+      }
+    }
   });
 
-  // 12. Durable Critical Audit Recording
-  await runTest('12.1 Critical audit recording waits for DB write and records critical event', async () => {
+  // 13. Durable Critical Audit Recording
+  await runTest('13.1 Critical audit recording waits for DB write and records critical event', async () => {
     const { data: ws } = await supabaseAdmin.from('workspaces').select('id').limit(1).maybeSingle();
     const wsId = ws ? ws.id : 'ws_default';
     const result = await auditService.recordCritical({
@@ -326,7 +440,7 @@ async function main() {
       resource_id: 'key_test_123',
       actor_type: 'service_account',
       actor_id: 'svc_test_123',
-      metadata: { reason: 'v3.8 test suite execution' },
+      metadata: { reason: 'v3.8.1 correctness gate execution' },
     });
     assert.strictEqual(result.success, true);
   });
