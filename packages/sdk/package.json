@@ -1,0 +1,29 @@
+{
+  "name": "@media-platform/sdk",
+  "version": "3.8.0",
+  "description": "Official TypeScript/JavaScript Client SDK for Media Platform Headless API & DAM",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test"
+  },
+  "keywords": [
+    "media",
+    "dam",
+    "video-hls",
+    "image-transform",
+    "sdk",
+    "typescript"
+  ],
+  "author": "Media Platform Team",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

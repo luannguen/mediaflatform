@@ -1,8 +1,9 @@
-import { Application, ServiceAccount, ApiKey } from '@/types/database';
+import { Application, ServiceAccount, ApiKey, ApiRequestLog } from '@/types/database';
 import { AppError } from '@/lib/errors/app-error';
 import { ErrorCodes } from '@/lib/errors/codes';
 import { generateId } from '@/lib/ids/generator';
 import { generateApiKey, verifyApiKeyHash, hasScope } from '@/lib/security/api-key';
+import { validateRequestedScopes } from '@/lib/security/scopeRegistry';
 import { isSupabaseAdminConfigured, supabaseAdmin } from '@/lib/supabase/admin';
 import { mockDb, mockWorkspace } from '@/lib/mock/store';
 
@@ -164,8 +165,42 @@ export const developerService = {
     workspaceId: string = mockWorkspace.id,
     serviceAccountId: string,
     name: string,
-    scopes: string[] = ['assets:read']
+    scopes: string[] = ['assets:read'],
+    environment: 'development' | 'staging' | 'production' = 'production'
   ): Promise<{ rawKey: string; keyRecord: Omit<ApiKey, 'key_hash'> }> {
+    // 1. Verify service account exists and belongs to workspace
+    if (isSupabaseAdminConfigured()) {
+      const { data: svc, error: svcErr } = await supabaseAdmin
+        .from('service_accounts')
+        .select('id, workspace_id')
+        .eq('id', serviceAccountId)
+        .maybeSingle();
+
+      if (svcErr || !svc || svc.workspace_id !== workspaceId) {
+        throw AppError.badRequest(
+          `Service account ${serviceAccountId} does not exist or does not belong to workspace ${workspaceId}`,
+          ErrorCodes.VALIDATION_ERROR
+        );
+      }
+    } else {
+      const svc = mockDb.serviceAccounts.find((s) => s.id === serviceAccountId && s.workspace_id === workspaceId);
+      if (!svc) {
+        throw AppError.badRequest(
+          `Service account ${serviceAccountId} does not exist or does not belong to workspace ${workspaceId}`,
+          ErrorCodes.VALIDATION_ERROR
+        );
+      }
+    }
+
+    // 2. Validate requested scopes against Scope Registry
+    const scopeCheck = validateRequestedScopes(scopes);
+    if (!scopeCheck.valid) {
+      throw AppError.badRequest(
+        `Invalid scopes requested: ${scopeCheck.invalidScopes.join(', ')}`,
+        ErrorCodes.VALIDATION_ERROR
+      );
+    }
+
     const { rawKey, keyPrefix, keyHash } = generateApiKey(true);
     const id = generateId('key');
     const now = new Date().toISOString();
@@ -179,6 +214,7 @@ export const developerService = {
       key_hash: keyHash,
       scopes,
       status: 'active',
+      environment,
       created_at: now,
     };
 
@@ -199,6 +235,89 @@ export const developerService = {
     return { rawKey, keyRecord: safeRecord };
   },
 
+  /**
+   * Rotate an API Key:
+   * Generates a successor key with identical scopes and service account.
+   * Sets grace period on the old key so existing clients have zero downtime.
+   */
+  async rotateApiKey(
+    keyId: string,
+    workspaceId: string = mockWorkspace.id,
+    gracePeriodDays: number = 7
+  ): Promise<{ rawKey: string; newKeyRecord: Omit<ApiKey, 'key_hash'>; oldKeyRecord: Omit<ApiKey, 'key_hash'> }> {
+    let existingKey: ApiKey | undefined;
+
+    if (isSupabaseAdminConfigured()) {
+      const { data, error } = await supabaseAdmin
+        .from('api_keys')
+        .select('*')
+        .eq('id', keyId)
+        .eq('workspace_id', workspaceId)
+        .maybeSingle();
+
+      if (error || !data) {
+        throw AppError.notFound(`API key ${keyId} not found in workspace ${workspaceId}`);
+      }
+      existingKey = data as ApiKey;
+    } else {
+      existingKey = mockDb.apiKeys.find((k) => k.id === keyId && k.workspace_id === workspaceId);
+      if (!existingKey) {
+        throw AppError.notFound(`API key ${keyId} not found in workspace ${workspaceId}`);
+      }
+    }
+
+    if (existingKey.status === 'revoked') {
+      throw AppError.badRequest('Cannot rotate an already revoked API key', ErrorCodes.API_KEY_REVOKED);
+    }
+
+    const now = new Date();
+    const graceExpiration = new Date(now.getTime() + gracePeriodDays * 24 * 3600 * 1000).toISOString();
+
+    // 1. Create successor key
+    const { rawKey: newRawKey, keyPrefix: newPrefix, keyHash: newHash } = generateApiKey(true);
+    const newKeyId = generateId('key');
+
+    const newKeyRecord: ApiKey = {
+      id: newKeyId,
+      workspace_id: workspaceId,
+      service_account_id: existingKey.service_account_id,
+      name: `${existingKey.name} (Rotated)`,
+      key_prefix: newPrefix,
+      key_hash: newHash,
+      scopes: existingKey.scopes,
+      status: 'active',
+      environment: existingKey.environment || 'production',
+      replaces_key_id: existingKey.id,
+      created_at: now.toISOString(),
+    };
+
+    // 2. Update old key with rotated_at and grace period expiry
+    existingKey.rotated_at = now.toISOString();
+    existingKey.expires_at = graceExpiration;
+
+    if (isSupabaseAdminConfigured()) {
+      await supabaseAdmin.from('api_keys').insert(newKeyRecord);
+      await supabaseAdmin
+        .from('api_keys')
+        .update({
+          rotated_at: existingKey.rotated_at,
+          expires_at: existingKey.expires_at,
+        })
+        .eq('id', existingKey.id);
+    } else {
+      mockDb.apiKeys.push(newKeyRecord);
+    }
+
+    const { key_hash: _h1, ...safeNew } = newKeyRecord;
+    const { key_hash: _h2, ...safeOld } = existingKey;
+
+    return {
+      rawKey: newRawKey,
+      newKeyRecord: safeNew,
+      oldKeyRecord: safeOld,
+    };
+  },
+
   async revokeApiKey(keyId: string, workspaceId: string = mockWorkspace.id): Promise<boolean> {
     const now = new Date().toISOString();
     if (!isSupabaseAdminConfigured()) {
@@ -217,6 +336,82 @@ export const developerService = {
 
     if (error) throw AppError.internal(`Failed to revoke API key: ${error.message}`);
     return true;
+  },
+
+  /**
+   * Asynchronously record an API request log without blocking
+   */
+  recordApiRequestLog(log: Omit<ApiRequestLog, 'id' | 'created_at'>) {
+    const id = generateId('log');
+    const fullLog: ApiRequestLog = {
+      id,
+      ...log,
+      created_at: new Date().toISOString(),
+    };
+
+    if (!isSupabaseAdminConfigured()) {
+      if (!(mockDb as any).apiRequestLogs) (mockDb as any).apiRequestLogs = [];
+      (mockDb as any).apiRequestLogs.unshift(fullLog);
+      if ((mockDb as any).apiRequestLogs.length > 500) (mockDb as any).apiRequestLogs.pop();
+      return;
+    }
+
+    supabaseAdmin
+      .from('api_request_logs')
+      .insert(fullLog)
+      .then(({ error }) => {
+        if (error) console.warn('[ApiRequestLog] Failed to record:', error.message);
+      });
+  },
+
+  /**
+   * List API request logs with filters and pagination
+   */
+  async listApiRequestLogs(
+    workspaceId: string = mockWorkspace.id,
+    options?: {
+      limit?: number;
+      offset?: number;
+      route?: string;
+      statusCode?: number;
+      requestId?: string;
+      applicationId?: string;
+    }
+  ): Promise<{ logs: ApiRequestLog[]; total: number }> {
+    const limit = Math.min(100, Math.max(1, options?.limit || 50));
+    const offset = Math.max(0, options?.offset || 0);
+
+    if (!isSupabaseAdminConfigured()) {
+      let list: ApiRequestLog[] = (mockDb as any).apiRequestLogs || [];
+      list = list.filter((l) => l.workspace_id === workspaceId);
+      if (options?.route) list = list.filter((l) => l.route.includes(options.route!));
+      if (options?.statusCode) list = list.filter((l) => l.status_code === options.statusCode);
+      if (options?.requestId) list = list.filter((l) => l.request_id === options.requestId);
+      if (options?.applicationId) list = list.filter((l) => l.application_id === options.applicationId);
+      return {
+        logs: list.slice(offset, offset + limit),
+        total: list.length,
+      };
+    }
+
+    let query = supabaseAdmin
+      .from('api_request_logs')
+      .select('*', { count: 'exact' })
+      .eq('workspace_id', workspaceId)
+      .order('created_at', { ascending: false });
+
+    if (options?.route) query = query.ilike('route', `%${options.route}%`);
+    if (options?.statusCode) query = query.eq('status_code', options.statusCode);
+    if (options?.requestId) query = query.eq('request_id', options.requestId);
+    if (options?.applicationId) query = query.eq('application_id', options.applicationId);
+
+    const { data, count, error } = await query.range(offset, offset + limit - 1);
+    if (error) throw AppError.internal(`Failed to list request logs: ${error.message}`);
+
+    return {
+      logs: (data as ApiRequestLog[]) || [],
+      total: count || 0,
+    };
   },
 
   /**

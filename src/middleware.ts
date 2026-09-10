@@ -22,8 +22,14 @@ export async function middleware(req: NextRequest) {
   // 3. Allow API routes (they enforce authentication via API Keys or session tokens internally)
   // Also handle CORS preflight OPTIONS requests for cross-origin callers
   if (pathname.startsWith('/api/')) {
+    const rawReqId = req.headers.get('x-request-id') || req.headers.get('X-Request-Id');
+    const sanitizedReqId = rawReqId
+      ? rawReqId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64)
+      : `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
+    const origin = req.headers.get('origin') || '*';
+
     if (req.method === 'OPTIONS') {
-      const origin = req.headers.get('origin') || '*';
       return new NextResponse(null, {
         status: 204,
         headers: {
@@ -31,12 +37,26 @@ export async function middleware(req: NextRequest) {
           'Access-Control-Allow-Credentials': 'true',
           'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
           'Access-Control-Allow-Headers':
-            'Content-Type, Authorization, X-Media-Api-Key, X-Workspace-Id, Cache-Control',
+            'Content-Type, Authorization, X-Media-Api-Key, X-Workspace-Id, X-Request-Id, Idempotency-Key, Cache-Control',
+          'Access-Control-Expose-Headers':
+            'X-Request-Id, RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset, Retry-After',
           'Access-Control-Max-Age': '86400',
         },
       });
     }
-    return NextResponse.next();
+
+    const requestHeaders = new Headers(req.headers);
+    requestHeaders.set('x-request-id', sanitizedReqId);
+
+    const response = NextResponse.next({
+      request: {
+        headers: requestHeaders,
+      },
+    });
+
+    response.headers.set('X-Request-Id', sanitizedReqId);
+    response.headers.set('Access-Control-Expose-Headers', 'X-Request-Id, RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset, Retry-After');
+    return response;
   }
 
   // 3. Inspect session cookie for web pages

@@ -26,6 +26,7 @@ export const ErrorCodes = {
   DECOMPRESSION_BOMB_PREVENTED: 'DECOMPRESSION_BOMB_PREVENTED',
   ASSET_QUARANTINED: 'ASSET_QUARANTINED',
   ASSET_DELETED: 'ASSET_DELETED',
+  IDEMPOTENCY_CONFLICT: 'IDEMPOTENCY_CONFLICT',
 } as const;
 
 export type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];

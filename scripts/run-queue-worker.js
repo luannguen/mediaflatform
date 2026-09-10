@@ -405,11 +405,43 @@ async function startDaemon() {
   if (isDirectMode) {
     supabase = createClient(supabaseUrl, supabaseKey);
     console.log(`[QueueDaemon] Connected directly to Supabase (${supabaseUrl})`);
+    try {
+      const now = new Date().toISOString();
+      await supabase.from('worker_instances').upsert({
+        id: `winst_${workerId}`,
+        worker_id: workerId,
+        instance_id: `inst_${process.pid}_${Date.now().toString(36)}`,
+        version: '3.8.0',
+        hostname: require('os').hostname(),
+        started_at: now,
+        last_heartbeat_at: now,
+        status: 'online',
+        capabilities: {
+          processors: ['image_optimization', 'transcode_video', 'document_extract'],
+          max_concurrency: 1,
+        },
+        runtime_info: {
+          node_version: process.version,
+          pid: process.pid,
+        },
+        created_at: now,
+        updated_at: now,
+      });
+      console.log(`[QueueDaemon] Registered instance in worker_instances fleet.`);
+    } catch (regErr) {
+      console.warn('[QueueDaemon] Fleet registry notice:', regErr.message);
+    }
   }
 
   while (isRunning) {
     try {
       isBusy = true;
+      if (supabase) {
+        supabase.from('worker_instances').update({
+          last_heartbeat_at: new Date().toISOString(),
+          status: 'online',
+        }).eq('worker_id', workerId).then();
+      }
 
       if (isDirectMode && supabase) {
         // Direct claim via PostgreSQL RPC

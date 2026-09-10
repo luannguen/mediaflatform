@@ -24,7 +24,11 @@ export type IdPrefix =
   | 'ver'
   | 'met'
   | 'iss'
-  | 'run';
+  | 'run'
+  | 'log'
+  | 'idemp'
+  | 'wrk'
+  | 'alert';
 
 /**
  * Generate a cryptographically secure human/debug-friendly prefixed identifier

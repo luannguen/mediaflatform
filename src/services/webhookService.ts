@@ -147,4 +147,91 @@ export const webhookService = {
     const { data } = await query;
     return (data as WebhookDelivery[]) || [];
   },
+
+  /**
+   * Safe Webhook Replay:
+   * 1. Validates delivery exists and belongs to endpoint within workspace.
+   * 2. Retains original historical attempt (immutable).
+   * 3. Triggers a new delivery attempt with a fresh delivery ID and timestamp.
+   */
+  async replayDelivery(deliveryId: string, workspaceId: string = mockWorkspace.id): Promise<WebhookDelivery> {
+    let delivery: WebhookDelivery | undefined;
+
+    if (!isSupabaseAdminConfigured()) {
+      delivery = mockDb.webhookDeliveries.find((d) => d.id === deliveryId);
+    } else {
+      const { data, error } = await supabaseAdmin
+        .from('webhook_deliveries')
+        .select('*')
+        .eq('id', deliveryId)
+        .maybeSingle();
+
+      if (error || !data) throw AppError.notFound(`Webhook delivery ${deliveryId} not found`);
+      delivery = data as WebhookDelivery;
+    }
+
+    if (!delivery) {
+      throw AppError.notFound(`Webhook delivery ${deliveryId} not found`);
+    }
+
+    // Verify endpoint belongs to workspace
+    const endpoints = await this.listEndpoints(workspaceId);
+    const endpoint = endpoints.find((e) => e.id === delivery!.webhook_endpoint_id);
+    if (!endpoint) {
+      throw AppError.forbidden(`Webhook endpoint not found or does not belong to workspace ${workspaceId}`);
+    }
+
+    // Dispatch a new delivery attempt retaining original event_id and payload
+    const newDeliveryId = generateId('evt');
+    const payloadString = JSON.stringify(delivery.payload);
+    const signature = crypto.createHmac('sha256', endpoint.secret_hash).update(payloadString).digest('hex');
+
+    let httpStatus = 0;
+    let status: 'delivered' | 'failed' = 'failed';
+    let responseSummary = '';
+
+    try {
+      const res = await fetch(endpoint.url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Media-Event': delivery.event_type,
+          'X-Media-Delivery': newDeliveryId,
+          'X-Media-Signature': signature,
+          'X-Media-Replay': 'true',
+        },
+        body: payloadString,
+        signal: AbortSignal.timeout(5000),
+      });
+
+      httpStatus = res.status;
+      status = res.ok ? 'delivered' : 'failed';
+      responseSummary = `HTTP ${res.status}`;
+    } catch (err: any) {
+      responseSummary = err.message || 'Replay connection failed';
+    }
+
+    const replayRecord: WebhookDelivery = {
+      id: newDeliveryId,
+      webhook_endpoint_id: endpoint.id,
+      event_type: delivery.event_type,
+      event_id: delivery.event_id,
+      payload: delivery.payload,
+      status,
+      http_status: httpStatus || undefined,
+      attempt_count: (delivery.attempt_count || 1) + 1,
+      last_attempt_at: new Date().toISOString(),
+      response_summary: `[REPLAY] ${responseSummary}`,
+      created_at: new Date().toISOString(),
+    };
+
+    if (isSupabaseAdminConfigured()) {
+      await supabaseAdmin.from('webhook_deliveries').insert(replayRecord);
+    } else {
+      mockDb.webhookDeliveries.unshift(replayRecord);
+    }
+
+    return replayRecord;
+  },
 };
+

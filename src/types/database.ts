@@ -262,6 +262,9 @@ export interface ApiKey {
   status: 'active' | 'revoked' | 'expired';
   expires_at?: string | null;
   last_used_at?: string | null;
+  replaces_key_id?: string | null;
+  rotated_at?: string | null;
+  environment?: 'development' | 'staging' | 'production';
   created_by?: string | null;
   created_at: string;
   revoked_at?: string | null;
@@ -467,4 +470,79 @@ export interface UsageMetric {
   user_agent?: string | null;
   created_at: string;
 }
+
+export interface WorkerInstance {
+  id: string;
+  worker_id: string;
+  instance_id: string;
+  version: string;
+  hostname?: string | null;
+  started_at: string;
+  last_heartbeat_at: string;
+  status: 'online' | 'busy' | 'stale' | 'offline';
+  current_job_id?: string | null;
+  completed_jobs_count?: number;
+  failed_jobs_count?: number;
+  capabilities: {
+    processors?: string[];
+    max_concurrency?: number;
+    supported_formats?: string[];
+    [key: string]: any;
+  };
+  runtime_info: {
+    node_version?: string;
+    sharp_version?: string;
+    ffmpeg_available?: boolean;
+    ffprobe_available?: boolean;
+    os?: string;
+    pid?: number;
+    [key: string]: any;
+  };
+  created_at: string;
+  updated_at: string;
+}
+
+export interface IdempotencyRecord {
+  id: string;
+  workspace_id: string;
+  idempotency_key: string;
+  route: string;
+  request_hash: string;
+  response_status: number;
+  response_headers: Record<string, string>;
+  response_body: any;
+  expires_at: string;
+  created_at: string;
+}
+
+export interface ApiRequestLog {
+  id: string;
+  request_id: string;
+  workspace_id: string;
+  application_id?: string | null;
+  service_account_id?: string | null;
+  api_key_id?: string | null;
+  method: string;
+  route: string;
+  status_code: number;
+  duration_ms: number;
+  response_bytes?: number | null;
+  user_agent?: string | null;
+  error_code?: string | null;
+  created_at: string;
+}
+
+export interface OperationalAlert {
+  id: string;
+  alert_key: string;
+  alert_type: string;
+  severity: 'info' | 'warning' | 'critical';
+  status: 'firing' | 'resolved';
+  message: string;
+  details: Record<string, any>;
+  first_seen_at: string;
+  last_seen_at: string;
+  resolved_at?: string | null;
+}
+
 

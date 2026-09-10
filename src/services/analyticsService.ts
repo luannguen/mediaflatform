@@ -125,66 +125,7 @@ export const analyticsService = {
       }
     }
 
-    // Default fallback demo stats if empty so dashboard is always expressive
-    if (metrics.length === 0) {
-      metrics = [
-        {
-          id: generateId('met'),
-          workspace_id: workspaceId,
-          asset_id: 'med_demo_nike_sneaker',
-          event_type: 'delivery',
-          bytes_transferred: 48500,
-          bytes_saved: 436700,
-          format: 'webp',
-          latency_ms: 24,
-          created_at: new Date(now.getTime() - 1000 * 60 * 15).toISOString(),
-        },
-        {
-          id: generateId('met'),
-          workspace_id: workspaceId,
-          asset_id: 'med_demo_nike_sneaker',
-          event_type: 'cache_hit',
-          bytes_transferred: 0,
-          bytes_saved: 485200,
-          format: 'webp',
-          latency_ms: 3,
-          created_at: new Date(now.getTime() - 1000 * 60 * 10).toISOString(),
-        },
-        {
-          id: generateId('met'),
-          workspace_id: workspaceId,
-          asset_id: 'med_demo_smartwatch',
-          event_type: 'delivery',
-          bytes_transferred: 39400,
-          bytes_saved: 354700,
-          format: 'avif',
-          latency_ms: 32,
-          created_at: new Date(now.getTime() - 1000 * 60 * 8).toISOString(),
-        },
-        {
-          id: generateId('met'),
-          workspace_id: workspaceId,
-          asset_id: 'med_demo_modern_villa',
-          event_type: 'cache_hit',
-          bytes_transferred: 0,
-          bytes_saved: 684200,
-          format: 'webp',
-          latency_ms: 4,
-          created_at: new Date(now.getTime() - 1000 * 60 * 5).toISOString(),
-        },
-        {
-          id: generateId('met'),
-          workspace_id: workspaceId,
-          asset_id: 'med_demo_tokyo_night',
-          event_type: 'delivery',
-          bytes_transferred: 84200,
-          bytes_saved: 757900,
-          format: 'webp',
-          latency_ms: 38,
-          created_at: new Date(now.getTime() - 1000 * 60 * 2).toISOString(),
-        },
-      ];
-    }
+    // Production Invariant: Empty metrics return real zero telemetry without injecting fake data
 
     const totalRequests = metrics.length;
     const cacheHits = metrics.filter((m) => m.event_type === 'cache_hit').length;
