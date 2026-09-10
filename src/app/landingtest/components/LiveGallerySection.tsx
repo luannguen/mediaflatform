@@ -18,6 +18,7 @@ interface AssetData {
   height?: number | null;
   storage_url?: string | null;
   status: string;
+  visibility?: 'public' | 'workspace' | 'private' | string;
   metadata_json?: {
     tags?: string[];
     category?: string;
@@ -293,8 +294,8 @@ export function LiveGallerySection() {
                         <img
                           src={
                             hoveredVideoId === asset.id
-                              ? `/api/v1/delivery/video/${asset.id}/trailer.webp`
-                              : `/api/v1/delivery/video/${asset.id}/poster.webp`
+                              ? `/api/v1/delivery/video/${asset.id}/trailer.webp${asset.visibility && asset.visibility !== 'public' ? `?api_key=${encodeURIComponent(DEMO_CREDENTIALS.rawKey)}` : ''}`
+                              : `/api/v1/delivery/video/${asset.id}/poster.webp${asset.visibility && asset.visibility !== 'public' ? `?api_key=${encodeURIComponent(DEMO_CREDENTIALS.rawKey)}` : ''}`
                           }
                           alt={asset.display_name}
                           loading="lazy"

@@ -25,6 +25,30 @@ export async function GET(
       return new NextResponse('Video asset not found', { status: 404 });
     }
 
+    // Must be video asset type
+    if (asset.asset_type !== 'video') {
+      return NextResponse.json(
+        { error: 'NOT_A_VIDEO', message: 'Requested asset is not a video asset' },
+        { status: 404 }
+      );
+    }
+
+    // Quarantined Asset Protection
+    if (asset.status === 'quarantined') {
+      return NextResponse.json(
+        {
+          error: 'ASSET_QUARANTINED',
+          message: 'This asset is quarantined for security review and cannot be delivered directly',
+        },
+        {
+          status: 403,
+          headers: {
+            'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+          },
+        }
+      );
+    }
+
     const isPrivate = asset.visibility === 'private' || asset.visibility === 'workspace';
 
     // Enforce Tenant-Aware Private Delivery Policy

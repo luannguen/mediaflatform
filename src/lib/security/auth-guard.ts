@@ -84,6 +84,11 @@ export async function authenticateRequest(
     rawKey = apiKeyHeader;
   } else if (authHeader && authHeader.startsWith('Bearer mda_')) {
     rawKey = authHeader.replace('Bearer ', '').trim();
+  } else if (req.nextUrl?.searchParams) {
+    const queryKey = req.nextUrl.searchParams.get('api_key') || req.nextUrl.searchParams.get('apiKey');
+    if (queryKey && queryKey.startsWith('mda_')) {
+      rawKey = queryKey.trim();
+    }
   }
 
   if (rawKey) {

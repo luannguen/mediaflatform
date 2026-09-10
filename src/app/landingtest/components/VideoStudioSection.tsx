@@ -35,6 +35,9 @@ interface VideoAsset {
   height?: number | null;
   duration_ms?: number | null;
   processing_status?: string;
+  visibility?: 'public' | 'workspace' | 'private' | string;
+  asset_type?: string;
+  status?: string;
   created_at: string;
   metadata_json?: any;
 }
@@ -103,14 +106,18 @@ export function VideoStudioSection() {
   const fetchVideos = async () => {
     setLoadingVideos(true);
     try {
-      const res = await fetch('/api/v1/assets?asset_type=video&limit=24', {
+      const res = await fetch('/api/v1/assets?type=video&asset_type=video&status=active&limit=24', {
         headers: {
           'X-Media-Api-Key': DEMO_CREDENTIALS.rawKey,
         },
       });
       if (!res.ok) throw new Error(`Lỗi tải danh sách video (${res.status})`);
       const json = await res.json();
-      const list: VideoAsset[] = json.data || [];
+      const rawList: any[] = json.data || [];
+      // Strictly ensure only genuine video assets that are not quarantined
+      const list: VideoAsset[] = rawList.filter(
+        (a) => (a.asset_type === 'video' || !a.asset_type) && a.status !== 'quarantined' && a.status !== 'deleted'
+      );
       setVideos(list);
 
       // Auto select first video if none selected
@@ -139,7 +146,8 @@ export function VideoStudioSection() {
     setCurrentBitrate(0);
     setCurrentResolution('Đang kết nối...');
 
-    const masterUrl = `/api/v1/delivery/video/${activeVideo.id}/master.m3u8`;
+    const authParam = activeVideo.visibility && activeVideo.visibility !== 'public' ? `?api_key=${encodeURIComponent(DEMO_CREDENTIALS.rawKey)}` : '';
+    const masterUrl = `/api/v1/delivery/video/${activeVideo.id}/master.m3u8${authParam}`;
 
     // Clean up previous Hls instance
     if (hlsRef.current) {
@@ -741,7 +749,7 @@ export function VideoStudioSection() {
                 ref={videoRef}
                 controls
                 playsInline
-                poster={`/api/v1/delivery/video/${activeVideo.id}/poster.webp`}
+                poster={`/api/v1/delivery/video/${activeVideo.id}/poster.webp${activeVideo.visibility && activeVideo.visibility !== 'public' ? `?api_key=${encodeURIComponent(DEMO_CREDENTIALS.rawKey)}` : ''}`}
                 className="w-full h-full object-contain"
                 onPlay={() => setIsPlaying(true)}
                 onPause={() => setIsPlaying(false)}
@@ -756,7 +764,8 @@ export function VideoStudioSection() {
                   <button
                     onClick={() => {
                       setPlayerError(null);
-                      const masterUrl = `/api/v1/delivery/video/${activeVideo.id}/master.m3u8`;
+                      const reloadAuthParam = activeVideo.visibility && activeVideo.visibility !== 'public' ? `?api_key=${encodeURIComponent(DEMO_CREDENTIALS.rawKey)}` : '';
+                      const masterUrl = `/api/v1/delivery/video/${activeVideo.id}/master.m3u8${reloadAuthParam}`;
                       if (hlsRef.current) {
                         hlsRef.current.loadSource(masterUrl);
                       }
@@ -914,8 +923,9 @@ export function VideoStudioSection() {
               {videos.map((v) => {
                 const isSelected = activeVideo?.id === v.id;
                 const isHovered = hoveredVideoId === v.id;
-                const posterUrl = `/api/v1/delivery/video/${v.id}/poster.webp`;
-                const trailerUrl = `/api/v1/delivery/video/${v.id}/trailer.webp`;
+                const authQuery = v.visibility && v.visibility !== 'public' ? `?api_key=${encodeURIComponent(DEMO_CREDENTIALS.rawKey)}` : '';
+                const posterUrl = `/api/v1/delivery/video/${v.id}/poster.webp${authQuery}`;
+                const trailerUrl = `/api/v1/delivery/video/${v.id}/trailer.webp${authQuery}`;
 
                 return (
                   <div

@@ -16,6 +16,7 @@ export interface ListAssetsParams {
   folderId?: string | null;
   assetType?: AssetType | 'all';
   status?: AssetStatus | 'all';
+  visibility?: 'public' | 'workspace' | 'private' | 'all';
   search?: string;
   page?: number;
   limit?: number | 'all';
@@ -90,6 +91,11 @@ export const assetService = {
       // Type filter
       if (params.assetType && params.assetType !== 'all') {
         filtered = filtered.filter((a) => a.asset_type === params.assetType);
+      }
+
+      // Visibility filter
+      if (params.visibility && params.visibility !== 'all') {
+        filtered = filtered.filter((a) => a.visibility === params.visibility);
       }
 
       // Search filter
@@ -169,6 +175,10 @@ export const assetService = {
 
     if (params.assetType && params.assetType !== 'all') {
       query = query.eq('asset_type', params.assetType);
+    }
+
+    if (params.visibility && params.visibility !== 'all') {
+      query = query.eq('visibility', params.visibility);
     }
 
     if (params.search) {
