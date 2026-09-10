@@ -3,6 +3,7 @@ import { assetService } from '@/services/assetService';
 import { analyticsService } from '@/services/analyticsService';
 import { authenticateRequest } from '@/lib/security/auth-guard';
 import { authorize } from '@/lib/security/resourceAuthorization';
+import { verifyDeliveryGrant } from '@/lib/security/delivery-grant';
 import { getStorageProvider } from '@/lib/storage/factory';
 import { getDeliveryPolicy, get304CacheControl } from '@/lib/media/deliveryPolicy';
 import {
@@ -51,50 +52,86 @@ export async function GET(
     }
 
     // 2. Enforce Tenant-Aware Private Delivery Policy & Identity Scope Hardening
+    const grantToken = searchParams.get('grant');
     if (asset.visibility === 'private' || asset.visibility === 'workspace') {
-      let principal: any;
-      try {
-        principal = await authenticateRequest(req, 'assets:read');
-      } catch (err: any) {
-        if (
-          err?.statusCode === 403 ||
-          err?.code === 'PERMISSION_DENIED' ||
-          err?.code === 'INSUFFICIENT_PERMISSIONS' ||
-          err?.code === 'FORBIDDEN'
-        ) {
+      if (grantToken) {
+        // 1. Verify via Delivery Grant
+        const grantRes = verifyDeliveryGrant(grantToken, assetId, asset.workspace_id, 'asset:read');
+        if (!grantRes.valid) {
           return NextResponse.json(
-            { error: err?.code || 'PERMISSION_DENIED', message: err?.message || 'Forbidden' },
+            { error: grantRes.code || 'DELIVERY_GRANT_INVALID', message: grantRes.message || 'Delivery grant invalid or expired' },
             {
               status: 403,
               headers: {
                 'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+                'Referrer-Policy': 'no-referrer',
               },
             }
           );
         }
-        return NextResponse.json(
-          { error: 'UNAUTHORIZED', message: 'Unauthorized: Private asset requires valid credentials' },
-          {
-            status: 401,
-            headers: {
-              'WWW-Authenticate': 'Bearer',
-              'Cache-Control': 'private, no-cache, no-store, must-revalidate',
-            },
-          }
-        );
-      }
 
-      const auth = authorize(principal, 'asset.read', asset);
-      if (!auth.allowed) {
-        return NextResponse.json(
-          { error: auth.code || 'PERMISSION_DENIED', message: auth.message || 'Forbidden' },
-          {
-            status: 403,
-            headers: {
-              'Cache-Control': 'private, no-cache, no-store, must-revalidate',
-            },
+        // Verify tenant boundary: grant workspace must match asset workspace
+        if (grantRes.payload && grantRes.payload.wid !== asset.workspace_id) {
+          return NextResponse.json(
+            { error: 'DELIVERY_GRANT_FORBIDDEN', message: 'Delivery grant workspace does not match asset workspace' },
+            {
+              status: 403,
+              headers: {
+                'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+                'Referrer-Policy': 'no-referrer',
+              },
+            }
+          );
+        }
+      } else {
+        // 2. Fallback to HTTP Header Authentication (Bearer token or X-API-Key)
+        let principal: any;
+        try {
+          principal = await authenticateRequest(req, 'assets:read');
+        } catch (err: any) {
+          if (
+            err?.statusCode === 403 ||
+            err?.code === 'PERMISSION_DENIED' ||
+            err?.code === 'INSUFFICIENT_PERMISSIONS' ||
+            err?.code === 'FORBIDDEN'
+          ) {
+            return NextResponse.json(
+              { error: err?.code || 'PERMISSION_DENIED', message: err?.message || 'Forbidden' },
+              {
+                status: 403,
+                headers: {
+                  'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+                  'Referrer-Policy': 'no-referrer',
+                },
+              }
+            );
           }
-        );
+          return NextResponse.json(
+            { error: 'UNAUTHORIZED', message: 'Unauthorized: Private asset requires valid credentials or delivery grant' },
+            {
+              status: 401,
+              headers: {
+                'WWW-Authenticate': 'Bearer',
+                'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+                'Referrer-Policy': 'no-referrer',
+              },
+            }
+          );
+        }
+
+        const auth = authorize(principal, 'asset.read', asset);
+        if (!auth.allowed) {
+          return NextResponse.json(
+            { error: auth.code || 'PERMISSION_DENIED', message: auth.message || 'Forbidden' },
+            {
+              status: 403,
+              headers: {
+                'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+                'Referrer-Policy': 'no-referrer',
+              },
+            }
+          );
+        }
       }
     }
 

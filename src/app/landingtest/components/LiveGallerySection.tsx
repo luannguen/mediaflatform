@@ -2,7 +2,6 @@
 
 import React, { useEffect, useState, useRef } from 'react';
 import { Database, Image as ImageIcon, Video, FileText, Search, Copy, Check, ExternalLink, RefreshCw, Eye, Sparkles, Trash2, ShieldAlert, Film } from 'lucide-react';
-import { DEMO_CREDENTIALS } from './HeroSection';
 import { toast } from 'sonner';
 import Hls from 'hls.js';
 
@@ -105,11 +104,11 @@ export function LiveGallerySection() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/v1/assets?limit=all', {
-        headers: {
-          'X-Media-Api-Key': DEMO_CREDENTIALS.rawKey,
-        },
-      });
+      let res = await fetch('/api/v1/assets?limit=all');
+      if (res.status === 401) {
+        await fetch('/api/v1/demo/session', { method: 'POST' });
+        res = await fetch('/api/v1/assets?limit=all');
+      }
 
       if (!res.ok) {
         throw new Error(`API trả về lỗi HTTP ${res.status}`);
@@ -294,8 +293,8 @@ export function LiveGallerySection() {
                         <img
                           src={
                             hoveredVideoId === asset.id
-                              ? `/api/v1/delivery/video/${asset.id}/trailer.webp${asset.visibility && asset.visibility !== 'public' ? `?api_key=${encodeURIComponent(DEMO_CREDENTIALS.rawKey)}` : ''}`
-                              : `/api/v1/delivery/video/${asset.id}/poster.webp${asset.visibility && asset.visibility !== 'public' ? `?api_key=${encodeURIComponent(DEMO_CREDENTIALS.rawKey)}` : ''}`
+                              ? `/api/v1/delivery/video/${asset.id}/trailer.webp`
+                              : `/api/v1/delivery/video/${asset.id}/poster.webp`
                           }
                           alt={asset.display_name}
                           loading="lazy"
@@ -560,7 +559,6 @@ export function LiveGallerySection() {
                     try {
                       const res = await fetch(`/api/v1/assets/${selectedAsset.id}?action=purge&force=true`, {
                         method: 'DELETE',
-                        headers: { 'X-Media-Api-Key': DEMO_CREDENTIALS.rawKey },
                       });
                       if (!res.ok) throw new Error(`Lỗi HTTP ${res.status}`);
                       toast.success(`Đã xóa sạch asset "${selectedAsset.display_name}" khỏi hệ thống!`);

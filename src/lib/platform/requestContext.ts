@@ -23,6 +23,8 @@ const SENSITIVE_KEYS = new Set([
   'access_token',
   'refresh_token',
   'private_key',
+  'grant',
+  'delivery_grant',
 ]);
 
 export function generateRequestId(): string {
@@ -57,8 +59,13 @@ export function extractRequestId(req?: NextRequest | Headers | null): string {
 export function redactSensitiveData(data: any): any {
   if (data === null || data === undefined) return data;
   if (typeof data === 'string') {
-    // Redact Bearer tokens or mda_ keys if in raw string
-    if (data.startsWith('Bearer ') || data.startsWith('mda_') || data.startsWith('whsec_')) {
+    // Redact Bearer tokens, mda_ keys, delivery grants if in raw string
+    if (
+      data.startsWith('Bearer ') ||
+      data.startsWith('mda_') ||
+      data.startsWith('whsec_') ||
+      data.startsWith('mdg_v1_')
+    ) {
       return '[REDACTED_SECRET]';
     }
     return data;
@@ -80,3 +87,26 @@ export function redactSensitiveData(data: any): any {
   }
   return result;
 }
+
+/**
+ * Redact sensitive query parameters from URLs (such as ?grant=..., ?api_key=...)
+ */
+export function redactUrl(urlStr: string): string {
+  try {
+    const isRelative = !urlStr.startsWith('http://') && !urlStr.startsWith('https://');
+    const url = new URL(urlStr, 'http://localhost');
+    const sensitiveQueryParams = ['grant', 'delivery_grant', 'api_key', 'apiKey', 'token', 'secret', 'key'];
+    for (const param of sensitiveQueryParams) {
+      if (url.searchParams.has(param)) {
+        url.searchParams.set(param, '[REDACTED]');
+      }
+    }
+    if (isRelative) {
+      return `${url.pathname}${url.search}${url.hash}`;
+    }
+    return url.toString();
+  } catch {
+    return urlStr;
+  }
+}
+

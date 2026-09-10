@@ -1,5 +1,5 @@
 /**
- * @media-platform/sdk v3.8.2
+ * @media-platform/sdk v3.8.4
  * Official TypeScript Client SDK for Media Platform
  * Universal (Node.js 18+, Modern Browsers, Cloudflare Workers, Edge Runtimes)
  */
@@ -428,6 +428,146 @@ export class MediaPlatformClient {
       }),
       ...options,
     });
+  }
+
+  async createDirectUploadSession(
+    input: {
+      filename: string;
+      fileSizeBytes: number;
+      mimeType: string;
+      folderId?: string | null;
+      displayName?: string;
+      visibility?: 'public' | 'workspace' | 'private';
+      metadata?: Record<string, any>;
+    },
+    options?: RequestOptions
+  ): Promise<{
+    session: {
+      id: string;
+      workspace_id: string;
+      storage_key: string;
+      filename: string;
+      status: string;
+      expires_at: string;
+    };
+    capability: {
+      protocol: 'signed-put' | 'tus';
+      uploadUrl: string;
+      method: string;
+      headers: Record<string, string>;
+      expiresAt: string;
+    };
+  }> {
+    return this.request('/api/v1/uploads/sessions', {
+      method: 'POST',
+      body: JSON.stringify({
+        filename: input.filename,
+        file_size: input.fileSizeBytes,
+        mime_type: input.mimeType,
+        folder_id: input.folderId || null,
+        display_name: input.displayName,
+        visibility: input.visibility || 'workspace',
+        metadata: input.metadata,
+      }),
+      ...options,
+    });
+  }
+
+  async completeDirectUploadSession(
+    sessionId: string,
+    clientChecksum?: string,
+    options?: RequestOptions
+  ): Promise<{ asset: Asset; job: any }> {
+    return this.request(`/api/v1/uploads/sessions/${sessionId}/complete`, {
+      method: 'POST',
+      body: clientChecksum ? JSON.stringify({ client_checksum: clientChecksum }) : undefined,
+      ...options,
+    });
+  }
+
+  async getDeliveryGrant(
+    assetId: string,
+    options?: RequestOptions
+  ): Promise<{
+    delivery_grant: string | null;
+    expires_in_seconds: number;
+    expires_at: string;
+    urls: {
+      master_playlist: string;
+      poster: string;
+      preview: string;
+    };
+  }> {
+    return this.request(`/api/v1/assets/${assetId}/delivery-grant`, {
+      method: 'GET',
+      ...options,
+    });
+  }
+
+  /**
+   * Resilient universal upload: uses direct upload session for files > 4MB,
+   * completely bypassing serverless payload limits.
+   */
+  async upload(
+    fileOrBlob: File | Blob | ArrayBuffer | Uint8Array,
+    opts: {
+      filename?: string;
+      mimeType?: string;
+      displayName?: string;
+      folderId?: string | null;
+      visibility?: 'private' | 'workspace' | 'public';
+      metadata?: Record<string, any>;
+      onProgress?: (progress: number) => void;
+      signal?: AbortSignal;
+    } = {}
+  ): Promise<Asset> {
+    const isBlob = fileOrBlob instanceof Blob || (typeof File !== 'undefined' && fileOrBlob instanceof File);
+    const size = isBlob ? (fileOrBlob as Blob).size : (fileOrBlob as any).byteLength || (fileOrBlob as any).length;
+    const filename = opts.filename || (fileOrBlob as any).name || opts.displayName || 'uploaded-file';
+    const mimeType = opts.mimeType || (fileOrBlob as any).type || 'application/octet-stream';
+
+    // If size <= 4MB, direct multipart is supported
+    if (size <= 4 * 1024 * 1024) {
+      return this.uploadAsset(fileOrBlob, {
+        displayName: opts.displayName || filename,
+        folderId: opts.folderId,
+        visibility: opts.visibility,
+        metadata: opts.metadata,
+      }, { signal: opts.signal });
+    }
+
+    // Direct Upload Session for large media (> 4MB)
+    const sessionRes = await this.createDirectUploadSession({
+      filename,
+      fileSizeBytes: size,
+      mimeType,
+      folderId: opts.folderId,
+      displayName: opts.displayName,
+      visibility: opts.visibility,
+      metadata: opts.metadata,
+    }, { signal: opts.signal });
+
+    const capability = sessionRes.capability;
+    const bodyData = isBlob ? fileOrBlob : new Blob([fileOrBlob as any], { type: mimeType });
+
+    const putRes = await fetch(capability.uploadUrl, {
+      method: capability.method || 'PUT',
+      headers: {
+        'Content-Type': mimeType,
+        ...(capability.headers || {}),
+      },
+      body: bodyData as any,
+      signal: opts.signal,
+    });
+
+    if (!putRes.ok && putRes.status !== 200 && putRes.status !== 201) {
+      throw new MediaPlatformError(`Direct upload failed with status ${putRes.status}`, 'UPLOAD_FAILED', putRes.status);
+    }
+
+    if (opts.onProgress) opts.onProgress(100);
+
+    const completed = await this.completeDirectUploadSession(sessionRes.session.id, undefined, { signal: opts.signal });
+    return completed.asset;
   }
 
   async getUsage(options?: RequestOptions): Promise<UsageQuota> {

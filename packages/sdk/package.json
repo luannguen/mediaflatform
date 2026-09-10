@@ -1,6 +1,6 @@
 {
   "name": "@media-platform/sdk",
-  "version": "3.8.3",
+  "version": "3.8.4",
   "description": "Official TypeScript/JavaScript Client SDK for Media Platform Headless API & DAM",
   "main": "dist/index.js",
   "module": "dist/index.mjs",

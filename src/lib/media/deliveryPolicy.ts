@@ -58,6 +58,9 @@ export function getDeliveryPolicy(
     'Content-Disposition': contentDisposition,
     'X-Content-Type-Options': 'nosniff',
   };
+  if (isPrivate) {
+    headers['Referrer-Policy'] = 'no-referrer';
+  }
   if (contentType) {
     headers['Content-Type'] = contentType;
   }

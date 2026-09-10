@@ -2,7 +2,6 @@
 
 import React, { useState, useEffect } from 'react';
 import { ExternalLink, Layers, CheckCircle2, Copy, Sparkles, ArrowUpRight, Code, ShieldCheck } from 'lucide-react';
-import { DEMO_CREDENTIALS } from './HeroSection';
 import { toast } from 'sonner';
 
 export function PickerDemoSection() {
@@ -25,7 +24,7 @@ export function PickerDemoSection() {
   }, []);
 
   const openPickerPopup = () => {
-    const pickerUrl = `/picker?api_key=${DEMO_CREDENTIALS.rawKey}&mode=single`;
+    const pickerUrl = `/picker?mode=single`;
     const width = 960;
     const height = 640;
     const left = (window.innerWidth - width) / 2;
@@ -70,7 +69,7 @@ export function PickerDemoSection() {
                   1
                 </div>
                 <div>
-                  <strong className="text-white">Bypass Login Redirect:</strong> Người dùng gọi Widget thông qua tham số <code className="text-purple-300 font-mono bg-slate-900 px-1 py-0.5 rounded">?api_key=...</code> mà không cần đăng nhập session trên nền tảng.
+                  <strong className="text-white">Seamless Session Auth:</strong> Người dùng gọi Widget thông qua HttpOnly Session Cookie an toàn hoặc Scoped PostMessage API mà không cần lộ API key trên client.
                 </div>
               </div>
 

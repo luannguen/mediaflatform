@@ -1,4 +1,4 @@
-import { StorageProvider, StorageUploadResult } from './provider';
+import { StorageProvider, StorageUploadResult, DirectUploadCapability, ObjectMetadata } from './provider';
 import { supabaseAdmin, isSupabaseAdminConfigured } from '../supabase/admin';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -171,6 +171,108 @@ export class SupabaseStorageProvider implements StorageProvider {
         'Content-Type': mimeType,
       },
       expiresInSeconds,
+    };
+  }
+
+  async getObjectMetadata(key: string, bucket: string = this.defaultBucket): Promise<ObjectMetadata | null> {
+    if (!isSupabaseAdminConfigured()) {
+      try {
+        const localFile = path.join(process.cwd(), 'scratch', 'storage', bucket, key);
+        if (fs.existsSync(localFile)) {
+          const stats = fs.statSync(localFile);
+          return {
+            sizeBytes: stats.size,
+            lastModified: stats.mtime,
+          };
+        }
+      } catch {}
+      return null;
+    }
+
+    try {
+      const { data, error } = await supabaseAdmin.storage.from(bucket).info(key);
+      if (error || !data) {
+        return null;
+      }
+      return {
+        sizeBytes: Number(data.size || 0),
+        contentType: data.contentType,
+        etag: data.etag,
+        lastModified: data.lastModified ? new Date(data.lastModified) : undefined,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async createDirectUploadSession(params: {
+    key: string;
+    mimeType: string;
+    sizeBytes?: number;
+    expiresInSeconds?: number;
+    bucket?: string;
+    preferProtocol?: 'signed-put' | 'tus';
+  }): Promise<DirectUploadCapability> {
+    const bucket = params.bucket || this.defaultBucket;
+    const expiresInSeconds = params.expiresInSeconds || 900;
+    const expiresAt = new Date(Date.now() + expiresInSeconds * 1000).toISOString();
+    const thresholdBytes = parseInt(process.env.MEDIA_RESUMABLE_UPLOAD_THRESHOLD_BYTES || '52428800', 10); // 50MB default
+
+    const shouldUseTus =
+      params.preferProtocol === 'tus' ||
+      (Boolean(params.sizeBytes && params.sizeBytes > thresholdBytes) && params.preferProtocol !== 'signed-put');
+
+    if (!isSupabaseAdminConfigured()) {
+      return {
+        protocol: shouldUseTus ? 'tus' : 'signed-put',
+        uploadUrl: `http://localhost:3000/api/v1/uploads/direct-mock?key=${encodeURIComponent(params.key)}`,
+        method: 'PUT',
+        headers: { 'Content-Type': params.mimeType },
+        storageKey: params.key,
+        storageProvider: this.name,
+        storageBucket: bucket,
+        expiresInSeconds,
+        expiresAt,
+      };
+    }
+
+    if (shouldUseTus) {
+      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.replace(/\/$/, '') || '';
+      return {
+        protocol: 'tus',
+        uploadUrl: `${supabaseUrl}/storage/v1/upload/resumable`,
+        method: 'POST',
+        headers: {
+          'Upload-Length': String(params.sizeBytes || 0),
+          'Upload-Metadata': `bucketName ${Buffer.from(bucket).toString('base64')},objectName ${Buffer.from(params.key).toString('base64')},contentType ${Buffer.from(params.mimeType).toString('base64')}`,
+        },
+        token: process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+        storageKey: params.key,
+        storageProvider: this.name,
+        storageBucket: bucket,
+        expiresInSeconds,
+        expiresAt,
+      };
+    }
+
+    const { data, error } = await supabaseAdmin.storage.from(bucket).createSignedUploadUrl(params.key);
+    if (error || !data) {
+      throw new Error(`Failed to create signed upload URL: ${error?.message}`);
+    }
+
+    return {
+      protocol: 'signed-put',
+      uploadUrl: data.signedUrl,
+      token: data.token,
+      method: 'PUT',
+      headers: {
+        'Content-Type': params.mimeType,
+      },
+      storageKey: params.key,
+      storageProvider: this.name,
+      storageBucket: bucket,
+      expiresInSeconds,
+      expiresAt,
     };
   }
 }

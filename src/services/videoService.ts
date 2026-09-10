@@ -6,6 +6,7 @@ import sharp from 'sharp';
 import { jobQueueService } from './jobQueueService';
 import { videoWorkerService, CANONICAL_LADDER } from './videoWorkerService';
 import { getStorageProvider } from '@/lib/storage/factory';
+import { appendDeliveryGrant } from '@/lib/security/delivery-grant';
 
 export interface VideoResolutionProfile {
   name: string; // 1080p, 720p, 480p, 360p
@@ -45,9 +46,26 @@ export const videoService = {
    * Serve HLS Master Playlist (.m3u8) directly from Storage artifacts
    * Falls back to dynamic non-upscaling ladder if processing is pending
    */
-  async generateMasterPlaylist(assetId: string, baseUrl: string = '', asset?: Asset): Promise<string | null> {
+  async generateMasterPlaylist(
+    assetId: string,
+    baseUrl: string = '',
+    asset?: Asset,
+    deliveryGrant?: string
+  ): Promise<string | null> {
     const currentAsset = asset || (await assetService.getAssetById(assetId));
     const storage = getStorageProvider();
+
+    const applyGrant = (content: string) => {
+      if (!deliveryGrant) return content;
+      return content
+        .split('\n')
+        .map((line) => {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith('#')) return line;
+          return appendDeliveryGrant(trimmed, deliveryGrant);
+        })
+        .join('\n');
+    };
 
     if (currentAsset) {
       const outputVersion = await this.getActiveOutputVersion(currentAsset);
@@ -55,14 +73,14 @@ export const videoService = {
         const masterStorageKey = `videos/${currentAsset.id}/${outputVersion}/master.m3u8`;
         const buffer = await storage.download(masterStorageKey);
         if (buffer && buffer.length > 0) {
-          return buffer.toString('utf8');
+          return applyGrant(buffer.toString('utf8'));
         }
       }
 
       // Check if real master m3u8 content is embedded in asset metadata (from CAS publish manifest)
       const assetManifestMaster = currentAsset.metadata_json?.hls?.master_m3u8 || currentAsset.metadata_json?.master_m3u8;
       if (typeof assetManifestMaster === 'string' && assetManifestMaster.includes('#EXTM3U')) {
-        return assetManifestMaster;
+        return applyGrant(assetManifestMaster);
       }
     }
 
@@ -70,11 +88,11 @@ export const videoService = {
     if (job?.metadata_json?.output_manifest?.master_m3u8) {
       const keyOrContent = job.metadata_json.output_manifest.master_m3u8;
       if (typeof keyOrContent === 'string' && keyOrContent.includes('#EXTM3U')) {
-        return keyOrContent;
+        return applyGrant(keyOrContent);
       }
       if (typeof keyOrContent === 'string') {
         const buf = await storage.download(keyOrContent);
-        if (buf && buf.length > 0) return buf.toString('utf8');
+        if (buf && buf.length > 0) return applyGrant(buf.toString('utf8'));
       }
     }
 
@@ -84,13 +102,14 @@ export const videoService = {
 
   /**
    * Serve Real HLS Variant Playlist from Storage artifacts
-   * Rewrites relative segment paths (e.g. 000.ts -> 720p/000.ts) so client fetches correct route
+   * Rewrites relative segment paths (e.g. 000.ts -> 720p/000.ts) and propagates deliveryGrant if present
    */
   async generateVariantPlaylist(
     assetId: string,
     profileName: string,
     baseUrl: string = '',
-    asset?: Asset
+    asset?: Asset,
+    deliveryGrant?: string
   ): Promise<string | null> {
     const currentAsset = asset || (await assetService.getAssetById(assetId));
     if (!currentAsset) return null;
@@ -98,24 +117,23 @@ export const videoService = {
     const storage = getStorageProvider();
     const outputVersion = await this.getActiveOutputVersion(currentAsset);
 
+    const applySegmentGrant = (rawContent: string) => {
+      return rawContent
+        .split('\n')
+        .map((line) => {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith('#')) return line;
+          const target = trimmed.endsWith('.ts') && !trimmed.includes('/') ? `${profileName}/${trimmed}` : trimmed;
+          return deliveryGrant ? appendDeliveryGrant(target, deliveryGrant) : target;
+        })
+        .join('\n');
+    };
+
     if (outputVersion) {
       const variantKey = `videos/${currentAsset.id}/${outputVersion}/${profileName}.m3u8`;
       const buffer = await storage.download(variantKey);
       if (buffer && buffer.length > 0) {
-        const rawContent = buffer.toString('utf8');
-        // Rewrite relative segment paths to include profile directory
-        // Example: '000.ts' -> '720p/000.ts'
-        const rewritten = rawContent
-          .split('\n')
-          .map((line) => {
-            const trimmed = line.trim();
-            if (trimmed.endsWith('.ts') && !trimmed.includes('/')) {
-              return `${profileName}/${trimmed}`;
-            }
-            return line;
-          })
-          .join('\n');
-        return rewritten;
+        return applySegmentGrant(buffer.toString('utf8'));
       }
     }
 
@@ -129,7 +147,7 @@ export const videoService = {
         const variantKey = `videos/${currentAsset.id}/${outputVersion}/${profileName}.m3u8`;
         const retryBuf = await storage.download(variantKey);
         if (retryBuf && retryBuf.length > 0) {
-          return retryBuf.toString('utf8');
+          return applySegmentGrant(retryBuf.toString('utf8'));
         }
       }
     }

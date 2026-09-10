@@ -10,7 +10,7 @@ import sharp from 'sharp';
 import { jobQueueService } from '@/services/jobQueueService';
 import { ProcessingJob } from '@/types/database';
 
-const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024; // 50MB limit
+const MEDIA_MULTIPART_MAX_BYTES = 4 * 1024 * 1024; // 4MB limit for serverless multipart uploads
 
 export async function POST(req: NextRequest) {
   try {
@@ -26,10 +26,11 @@ export async function POST(req: NextRequest) {
       throw AppError.badRequest('No file provided in form data field "file"', ErrorCodes.VALIDATION_ERROR);
     }
 
-    if (file.size > MAX_FILE_SIZE_BYTES) {
-      throw AppError.badRequest(
-        `File size (${(file.size / 1024 / 1024).toFixed(1)}MB) exceeds maximum limit of 50MB`,
-        ErrorCodes.UPLOAD_TOO_LARGE
+    if (file.size > MEDIA_MULTIPART_MAX_BYTES) {
+      throw new AppError(
+        `Direct multipart upload is restricted to <= 4MB (received ${(file.size / 1024 / 1024).toFixed(1)}MB) to prevent serverless payload limits. Use direct upload sessions via POST /api/v1/uploads/sessions.`,
+        ErrorCodes.DIRECT_UPLOAD_REQUIRED,
+        413
       );
     }
 
@@ -48,6 +49,7 @@ export async function POST(req: NextRequest) {
     // Upload via Storage Provider abstraction
     const storage = getStorageProvider();
     let uploadedStorageKey: string | null = null;
+    let assetCommitted = false;
 
     try {
       const uploadResult = await storage.upload(buffer, storageKey, file.type);
@@ -106,6 +108,7 @@ export async function POST(req: NextRequest) {
         createdByServiceAccountId: principal.serviceAccountId,
         metadata,
       });
+      assetCommitted = true;
 
       let job: ProcessingJob | null = null;
       if (file.type && file.type.startsWith('video/')) {
@@ -141,11 +144,11 @@ export async function POST(req: NextRequest) {
         201
       );
     } catch (pipelineError) {
-      // Storage compensation: If asset insertion or downstream steps failed, clean up uploaded storage object
-      if (uploadedStorageKey) {
+      // Storage compensation: Only clean up uploaded storage object if asset insertion in DB was NOT committed
+      if (uploadedStorageKey && !assetCommitted) {
         try {
           await storage.delete(uploadedStorageKey);
-          console.log(`[UploadCompensation] Successfully compensated/deleted storage object: ${uploadedStorageKey}`);
+          console.log(`[UploadCompensation] Successfully compensated/deleted uncommitted storage object: ${uploadedStorageKey}`);
         } catch (cleanupError: any) {
           console.error(
             `[UploadCompensation] FAILED to delete orphaned storage object ${uploadedStorageKey}:`,

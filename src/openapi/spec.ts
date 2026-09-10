@@ -237,6 +237,50 @@ export const openApiSpec: Record<string, any> = {
           },
         },
       },
+      UploadSession: {
+        type: 'object',
+        required: ['id', 'workspace_id', 'filename', 'mime_type', 'size_bytes', 'status', 'expires_at'],
+        properties: {
+          id: { type: 'string', example: 'sess_1a2b3c4d' },
+          workspace_id: { type: 'string', example: 'ws_default' },
+          folder_id: { type: 'string', nullable: true },
+          filename: { type: 'string', example: 'product_launch.mp4' },
+          display_name: { type: 'string', example: 'Product Launch Video' },
+          mime_type: { type: 'string', example: 'video/mp4' },
+          size_bytes: { type: 'integer', example: 52428800 },
+          status: { type: 'string', enum: ['created', 'uploading', 'uploaded', 'verifying', 'completed', 'expired_pending_cleanup', 'expired', 'failed', 'cancelled'] },
+          expires_at: { type: 'string', format: 'date-time' },
+          asset_id: { type: 'string', nullable: true },
+        },
+      },
+      DirectUploadCapability: {
+        type: 'object',
+        required: ['protocol', 'uploadUrl', 'method', 'headers', 'expiresAt'],
+        properties: {
+          protocol: { type: 'string', enum: ['signed-put', 'tus'] },
+          uploadUrl: { type: 'string', example: 'https://storage.supabase.co/object/upload/...' },
+          method: { type: 'string', example: 'PUT' },
+          headers: { type: 'object', additionalProperties: { type: 'string' } },
+          expiresAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      DeliveryGrantResponse: {
+        type: 'object',
+        required: ['expires_in_seconds', 'expires_at', 'urls'],
+        properties: {
+          delivery_grant: { type: 'string', nullable: true, example: 'mdg_v1_eyJhbGci...' },
+          expires_in_seconds: { type: 'integer', example: 300 },
+          expires_at: { type: 'string', format: 'date-time' },
+          urls: {
+            type: 'object',
+            properties: {
+              master_playlist: { type: 'string' },
+              poster: { type: 'string' },
+              preview: { type: 'string' },
+            },
+          },
+        },
+      },
       ApiKey: {
         type: 'object',
         required: ['id', 'workspace_id', 'service_account_id', 'name', 'key_prefix', 'scopes', 'status', 'created_at'],
@@ -767,6 +811,68 @@ export const openApiSpec: Record<string, any> = {
         summary: 'Register Developer Application',
         responses: {
           '201': { description: 'Application registered', content: { 'application/json': { schema: { type: 'object' } } } },
+        },
+      },
+    },
+    '/uploads/sessions': {
+      post: {
+        operationId: 'createUploadSession',
+        summary: 'Create Direct Upload Session',
+        description: 'Initiates a decoupled direct upload session returning a scoped storage capability (signed-put or tus).',
+        responses: {
+          '201': {
+            description: 'Direct upload session and capability created',
+            content: { 'application/json': { schema: { type: 'object' } } },
+          },
+          '413': { description: 'Payload too large' },
+        },
+      },
+    },
+    '/uploads/sessions/{id}/complete': {
+      post: {
+        operationId: 'completeUploadSession',
+        summary: 'Finalize Direct Upload Session',
+        description: 'Synchronously verifies storage metadata and commits the asset atomically via PostgreSQL RPC.',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'Session completed (idempotent replay)' },
+          '201': { description: 'Session completed and asset committed' },
+          '400': { description: 'Upload file not found or invalid session status' },
+        },
+      },
+    },
+    '/uploads/sessions/{id}/refresh-capability': {
+      post: {
+        operationId: 'refreshUploadCapability',
+        summary: 'Refresh Direct Upload Capability',
+        description: 'Extends or refreshes upload capability TTL for long-running uploads.',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'Refreshed capability' },
+        },
+      },
+    },
+    '/assets/{id}/delivery-grant': {
+      get: {
+        operationId: 'getDeliveryGrant',
+        summary: 'Mint Delivery Grant',
+        description: 'Issues a short-lived HMAC-signed delivery grant for private media playback.',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': {
+            description: 'Delivery grant minted',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/DeliveryGrantResponse' } } },
+          },
+        },
+      },
+    },
+    '/demo/session': {
+      post: {
+        operationId: 'createDemoSession',
+        summary: 'Demo Session Broker',
+        description: 'Issues an HttpOnly session cookie for demo frontend exploration without exposing secrets.',
+        responses: {
+          '200': { description: 'Session established' },
         },
       },
     },

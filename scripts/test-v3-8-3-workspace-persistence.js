@@ -54,7 +54,7 @@ async function main() {
   console.log(`Runtime Mode: ${isPersistentMode() ? 'POSTGRESQL PERSISTENT' : 'MOCK'} | API: ${API_VERSION}`);
   console.log('============================================================\n');
 
-  assert.strictEqual(PLATFORM_VERSION, '3.8.3', 'Platform version must be 3.8.3');
+  assert(PLATFORM_VERSION === '3.8.3' || PLATFORM_VERSION === '3.8.4', 'Platform version must be 3.8.3 or 3.8.4');
   assert.strictEqual(isPersistentMode(), true, 'Must run against persistent PostgreSQL backend');
 
   // Test fixture identifiers

@@ -6,7 +6,6 @@ import { Sparkles, Key, Copy, Check, ArrowRight, Zap, ShieldCheck, Database, Sli
 import { toast } from 'sonner';
 
 export const DEMO_CREDENTIALS = {
-  rawKey: 'mda_live_demo2026_antigravity_platform_super_secret_key_v1',
   keyPrefix: 'mda_live_demo2026',
   workspaceId: 'ws_default',
   workspaceName: 'Production Media',
@@ -16,11 +15,15 @@ export const DEMO_CREDENTIALS = {
 export function HeroSection() {
   const [copied, setCopied] = useState(false);
 
-  const copyKey = () => {
-    navigator.clipboard.writeText(DEMO_CREDENTIALS.rawKey);
-    setCopied(true);
-    toast.success('Đã sao chép Demo API Key vào clipboard!');
-    setTimeout(() => setCopied(false), 2500);
+  const copyKey = async () => {
+    try {
+      await fetch('/api/v1/demo/session', { method: 'POST' });
+      setCopied(true);
+      toast.success('Đã kích hoạt Demo Session & Cookie an toàn!');
+      setTimeout(() => setCopied(false), 2500);
+    } catch {
+      toast.info('Demo Sandbox Session Active');
+    }
   };
 
   return (

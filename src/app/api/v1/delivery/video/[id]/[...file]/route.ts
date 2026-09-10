@@ -4,6 +4,7 @@ import { videoService } from '@/services/videoService';
 import { getStorageProvider } from '@/lib/storage/factory';
 import { authenticateRequest } from '@/lib/security/auth-guard';
 import { authorize } from '@/lib/security/resourceAuthorization';
+import { verifyDeliveryGrant, DeliveryGrantPermission } from '@/lib/security/delivery-grant';
 
 export async function GET(
   req: NextRequest,
@@ -44,72 +45,134 @@ export async function GET(
           status: 403,
           headers: {
             'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+            'Referrer-Policy': 'no-referrer',
           },
         }
       );
     }
 
     const isPrivate = asset.visibility === 'private' || asset.visibility === 'workspace';
+    const grantToken = req.nextUrl.searchParams.get('grant');
+
+    // Determine required delivery grant permission based on requested resource
+    let requiredPerm: DeliveryGrantPermission | undefined;
+    if (fileName === 'poster.webp' || fileName === 'poster.jpg' || fileName === 'poster.png') {
+      requiredPerm = 'poster:read';
+    } else if (fileName === 'preview.webp' || fileName === 'trailer.webp') {
+      requiredPerm = 'preview:read';
+    } else if (fileName.endsWith('.m3u8') || fileName.endsWith('.ts') || fileName.endsWith('.m4s')) {
+      requiredPerm = 'hls:read';
+    }
 
     // Enforce Tenant-Aware Private Delivery Policy
     if (isPrivate) {
-      let principal: any;
-      try {
-        principal = await authenticateRequest(req, 'assets:read');
-      } catch (err: any) {
-        if (
-          err?.statusCode === 403 ||
-          err?.code === 'PERMISSION_DENIED' ||
-          err?.code === 'INSUFFICIENT_PERMISSIONS' ||
-          err?.code === 'FORBIDDEN'
-        ) {
+      if (grantToken) {
+        // 1. Verify via Delivery Grant
+        const grantRes = verifyDeliveryGrant(grantToken, assetId, asset.workspace_id, requiredPerm || 'video:delivery');
+        if (!grantRes.valid) {
+          const status = 403;
           return NextResponse.json(
-            { error: err?.code || 'PERMISSION_DENIED', message: err?.message || 'Forbidden' },
+            { error: grantRes.code || 'DELIVERY_GRANT_INVALID', message: grantRes.message || 'Delivery grant invalid or expired' },
             {
-              status: 403,
+              status,
               headers: {
                 'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+                'Referrer-Policy': 'no-referrer',
               },
             }
           );
         }
-        return NextResponse.json(
-          { error: 'UNAUTHORIZED', message: 'Unauthorized: Private asset requires valid credentials' },
-          {
-            status: 401,
-            headers: {
-              'WWW-Authenticate': 'Bearer',
-              'Cache-Control': 'private, no-cache, no-store, must-revalidate',
-            },
-          }
-        );
-      }
 
-      const auth = authorize(principal, 'asset.read', asset);
-      if (!auth.allowed) {
-        return NextResponse.json(
-          { error: auth.code || 'PERMISSION_DENIED', message: auth.message || 'Forbidden' },
-          {
-            status: 403,
-            headers: {
-              'Cache-Control': 'private, no-cache, no-store, must-revalidate',
-            },
+        // Verify tenant boundary: grant workspace must match asset workspace
+        if (grantRes.payload && grantRes.payload.wid !== asset.workspace_id) {
+          return NextResponse.json(
+            { error: 'DELIVERY_GRANT_FORBIDDEN', message: 'Delivery grant workspace does not match asset workspace' },
+            {
+              status: 403,
+              headers: {
+                'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+                'Referrer-Policy': 'no-referrer',
+              },
+            }
+          );
+        }
+      } else {
+        // 2. Fallback to HTTP Header Authentication (Bearer token or X-API-Key)
+        let principal: any;
+        try {
+          principal = await authenticateRequest(req, 'assets:read');
+        } catch (err: any) {
+          if (
+            err?.statusCode === 403 ||
+            err?.code === 'PERMISSION_DENIED' ||
+            err?.code === 'INSUFFICIENT_PERMISSIONS' ||
+            err?.code === 'FORBIDDEN'
+          ) {
+            return NextResponse.json(
+              { error: err?.code || 'PERMISSION_DENIED', message: err?.message || 'Forbidden' },
+              {
+                status: 403,
+                headers: {
+                  'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+                  'Referrer-Policy': 'no-referrer',
+                },
+              }
+            );
           }
-        );
+          return NextResponse.json(
+            { error: 'UNAUTHORIZED', message: 'Unauthorized: Private asset requires valid credentials or delivery grant' },
+            {
+              status: 401,
+              headers: {
+                'WWW-Authenticate': 'Bearer',
+                'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+                'Referrer-Policy': 'no-referrer',
+              },
+            }
+          );
+        }
+
+        const auth = authorize(principal, 'asset.read', asset);
+        if (!auth.allowed) {
+          return NextResponse.json(
+            { error: auth.code || 'PERMISSION_DENIED', message: auth.message || 'Forbidden' },
+            {
+              status: 403,
+              headers: {
+                'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+                'Referrer-Policy': 'no-referrer',
+              },
+            }
+          );
+        }
       }
     }
 
     const baseUrl = new URL(req.url).origin;
+    const cacheHeader = isPrivate
+      ? 'private, no-cache, no-store, must-revalidate'
+      : 'public, max-age=86400, s-maxage=86400, immutable';
+    const imageCacheHeader = isPrivate
+      ? 'private, no-cache, no-store, must-revalidate'
+      : 'public, max-age=31536000, s-maxage=31536000, immutable';
+
+    const baseHeaders: Record<string, string> = {
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': cacheHeader,
+    };
+    if (isPrivate) {
+      baseHeaders['Referrer-Policy'] = 'no-referrer';
+    }
 
     // 1. Master HLS Playlist
     if (fileName === 'master.m3u8') {
       if (asset.processing_status === 'failed') {
         return NextResponse.json(
           { error: 'PROCESSING_FAILED', message: 'Video processing failed' },
-          { status: 410 }
+          { status: 410, headers: baseHeaders }
         );
       }
-      const playlist = await videoService.generateMasterPlaylist(assetId, baseUrl, asset);
+      const playlist = await videoService.generateMasterPlaylist(assetId, baseUrl, asset, grantToken || undefined);
       if (!playlist) {
         if (asset.processing_status === 'pending' || asset.processing_status === 'processing') {
           return NextResponse.json(
@@ -120,7 +183,7 @@ export async function GET(
             },
             {
               status: 425,
-              headers: { 'Retry-After': '5' },
+              headers: { ...baseHeaders, 'Retry-After': '5' },
             }
           );
         }
@@ -133,20 +196,19 @@ export async function GET(
             },
             {
               status: 503,
-              headers: { 'Retry-After': '10' },
+              headers: { ...baseHeaders, 'Retry-After': '10' },
             }
           );
         }
         return NextResponse.json(
           { error: 'NOT_FOUND', message: 'Master playlist not found' },
-          { status: 404 }
+          { status: 404, headers: baseHeaders }
         );
       }
       return new NextResponse(playlist, {
         headers: {
+          ...baseHeaders,
           'Content-Type': 'application/vnd.apple.mpegurl',
-          'Access-Control-Allow-Origin': '*',
-          'Cache-Control': isPrivate ? 'private, no-cache, no-store, must-revalidate' : 'public, max-age=86400, s-maxage=86400, immutable',
         },
       });
     }
@@ -154,21 +216,29 @@ export async function GET(
     // 2. Resolution Variant Playlists (1080p.m3u8, 720p.m3u8, etc.)
     if (fileName.endsWith('.m3u8')) {
       const profileName = fileName.replace('.m3u8', '');
-      const variantPlaylist = await videoService.generateVariantPlaylist(assetId, profileName, baseUrl, asset);
+      const variantPlaylist = await videoService.generateVariantPlaylist(
+        assetId,
+        profileName,
+        baseUrl,
+        asset,
+        grantToken || undefined
+      );
       if (!variantPlaylist) {
         if (asset.processing_status === 'pending' || asset.processing_status === 'processing') {
-          return new NextResponse('Video transcoding is in progress', { status: 425 });
+          return new NextResponse('Video transcoding is in progress', { status: 425, headers: baseHeaders });
         }
         if (asset.processing_status === 'ready') {
-          return new NextResponse('MEDIA_ARTIFACT_MISSING: Transcoded variant playlist not found in storage', { status: 503 });
+          return new NextResponse('MEDIA_ARTIFACT_MISSING: Transcoded variant playlist not found in storage', {
+            status: 503,
+            headers: baseHeaders,
+          });
         }
-        return new NextResponse('Variant playlist not found', { status: 404 });
+        return new NextResponse('Variant playlist not found', { status: 404, headers: baseHeaders });
       }
       return new NextResponse(variantPlaylist, {
         headers: {
+          ...baseHeaders,
           'Content-Type': 'application/vnd.apple.mpegurl',
-          'Access-Control-Allow-Origin': '*',
-          'Cache-Control': isPrivate ? 'private, no-cache, no-store, must-revalidate' : 'public, max-age=86400, s-maxage=86400, immutable',
         },
       });
     }
@@ -178,9 +248,9 @@ export async function GET(
       const posterBuffer = await videoService.getVideoPoster(asset);
       return new NextResponse(new Uint8Array(posterBuffer), {
         headers: {
+          ...baseHeaders,
           'Content-Type': 'image/webp',
-          'Access-Control-Allow-Origin': '*',
-          'Cache-Control': isPrivate ? 'private, no-cache, no-store, must-revalidate' : 'public, max-age=31536000, s-maxage=31536000, immutable',
+          'Cache-Control': imageCacheHeader,
         },
       });
     }
@@ -190,9 +260,9 @@ export async function GET(
       const previewBuffer = await videoService.getVideoPreview(asset);
       return new NextResponse(new Uint8Array(previewBuffer), {
         headers: {
+          ...baseHeaders,
           'Content-Type': 'image/webp',
-          'Access-Control-Allow-Origin': '*',
-          'Cache-Control': isPrivate ? 'private, no-cache, no-store, must-revalidate' : 'public, max-age=31536000, s-maxage=31536000, immutable',
+          'Cache-Control': imageCacheHeader,
         },
       });
     }
@@ -220,7 +290,10 @@ export async function GET(
           try {
             redirectUrl = await storage.getSignedDownloadUrl(exactStorageKey, 60);
           } catch {
-            return new NextResponse('MEDIA_ARTIFACT_MISSING: Private segment not found in storage', { status: 503 });
+            return new NextResponse('MEDIA_ARTIFACT_MISSING: Private segment not found in storage', {
+              status: 503,
+              headers: baseHeaders,
+            });
           }
         } else {
           redirectUrl = storage.getPublicUrl(exactStorageKey);
@@ -229,23 +302,26 @@ export async function GET(
         return NextResponse.redirect(redirectUrl, {
           status: 307,
           headers: {
-            'Access-Control-Allow-Origin': '*',
+            ...baseHeaders,
             'Cache-Control': isPrivate ? 'private, no-cache, no-store, must-revalidate' : 'public, max-age=31536000, s-maxage=31536000, immutable',
           },
         });
       }
 
       if (asset.processing_status === 'pending' || asset.processing_status === 'processing') {
-        return new NextResponse('Video segment is still processing', { status: 425 });
+        return new NextResponse('Video segment is still processing', { status: 425, headers: baseHeaders });
       }
       if (asset.processing_status === 'ready') {
-        return new NextResponse('MEDIA_ARTIFACT_MISSING: Video segment not found in storage', { status: 503 });
+        return new NextResponse('MEDIA_ARTIFACT_MISSING: Video segment not found in storage', {
+          status: 503,
+          headers: baseHeaders,
+        });
       }
 
-      return new NextResponse('Segment unavailable', { status: 404 });
+      return new NextResponse('Segment unavailable', { status: 404, headers: baseHeaders });
     }
 
-    return new NextResponse('File format not supported', { status: 400 });
+    return new NextResponse('File format not supported', { status: 400, headers: baseHeaders });
   } catch (error: any) {
     return new NextResponse(`Video streaming error: ${error.message}`, { status: 500 });
   }

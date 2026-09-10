@@ -97,19 +97,21 @@ export class MediaClient {
   }
 
   /**
-   * Upload media (legacy or standard session flow)
+   * Upload media (v3.8.4 Direct Upload Session flow)
+   * Direct-to-storage upload bypassing serverless function payload limits
    */
   async upload(file: File | Blob, options: UploadOptions = {}): Promise<any> {
     const filename = (file as File).name || 'upload.bin';
     const mimeType = file.type || 'application/octet-stream';
     const sizeBytes = file.size;
 
-    const sessionRes = await this.request('/api/v1/uploads', {
+    // 1. Create upload session
+    const sessionRes = await this.request('/api/v1/uploads/sessions', {
       method: 'POST',
       body: JSON.stringify({
-        original_filename: filename,
+        filename,
+        file_size: sizeBytes,
         mime_type: mimeType,
-        size_bytes: sizeBytes,
         display_name: options.displayName || filename,
         folder_id: options.folderId || null,
         visibility: options.visibility || 'workspace',
@@ -117,25 +119,50 @@ export class MediaClient {
       }),
     });
 
-    if (sessionRes.upload_url) {
-      const uploadHeaders: Record<string, string> = {};
-      if (sessionRes.headers) {
-        Object.assign(uploadHeaders, sessionRes.headers);
-      }
-      uploadHeaders['Content-Type'] = mimeType;
+    const capability = sessionRes.capability;
+    const session = sessionRes.session;
 
-      const directRes = await fetch(sessionRes.upload_url, {
-        method: 'PUT',
+    if (capability?.uploadUrl) {
+      const uploadHeaders: Record<string, string> = {
+        'Content-Type': mimeType,
+        ...(capability.headers || {}),
+      };
+
+      const directRes = await fetch(capability.uploadUrl, {
+        method: capability.method || 'PUT',
         headers: uploadHeaders,
         body: file,
       });
 
-      if (!directRes.ok) {
+      if (!directRes.ok && directRes.status !== 200 && directRes.status !== 201) {
         throw new Error(`Direct upload failed with status ${directRes.status}`);
       }
     }
 
-    return sessionRes.asset || sessionRes;
+    // 2. Finalize session atomically via PostgreSQL RPC
+    const completeRes = await this.request(`/api/v1/uploads/sessions/${session.id}/complete`, {
+      method: 'POST',
+    });
+
+    return completeRes.asset || completeRes;
+  }
+
+  /**
+   * Mint short-lived delivery grant for private asset delivery
+   */
+  async getDeliveryGrant(assetId: string): Promise<{
+    delivery_grant: string | null;
+    expires_in_seconds: number;
+    expires_at: string;
+    urls: {
+      master_playlist: string;
+      poster: string;
+      preview: string;
+    };
+  }> {
+    return this.request(`/api/v1/assets/${assetId}/delivery-grant`, {
+      method: 'GET',
+    });
   }
 
   /**

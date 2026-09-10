@@ -15,6 +15,26 @@ export interface PresignedUploadResult {
   expiresInSeconds: number;
 }
 
+export interface DirectUploadCapability {
+  protocol: 'signed-put' | 'tus';
+  uploadUrl: string;
+  method: 'PUT' | 'POST';
+  headers?: Record<string, string>;
+  token?: string;
+  storageKey: string;
+  storageProvider: string;
+  storageBucket: string;
+  expiresInSeconds: number;
+  expiresAt: string;
+}
+
+export interface ObjectMetadata {
+  sizeBytes: number;
+  contentType?: string;
+  etag?: string;
+  lastModified?: Date;
+}
+
 export interface StorageProvider {
   readonly name: string;
   upload(
@@ -34,4 +54,13 @@ export interface StorageProvider {
     expiresInSeconds?: number,
     bucket?: string
   ): Promise<PresignedUploadResult>;
+  createDirectUploadSession(params: {
+    key: string;
+    mimeType: string;
+    sizeBytes?: number;
+    expiresInSeconds?: number;
+    bucket?: string;
+    preferProtocol?: 'signed-put' | 'tus';
+  }): Promise<DirectUploadCapability>;
+  getObjectMetadata(key: string, bucket?: string): Promise<ObjectMetadata | null>;
 }

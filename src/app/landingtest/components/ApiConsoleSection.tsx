@@ -84,7 +84,6 @@ export function ApiConsoleSection() {
         method: selectedPreset.method,
         headers: {
           'Content-Type': 'application/json',
-          'X-Media-Api-Key': DEMO_CREDENTIALS.rawKey,
           'X-Media-Api-Version': '2026-09-01',
         },
       };
@@ -93,7 +92,11 @@ export function ApiConsoleSection() {
         options.body = customBody;
       }
 
-      const res = await fetch(customPath, options);
+      let res = await fetch(customPath, options);
+      if (res.status === 401) {
+        await fetch('/api/v1/demo/session', { method: 'POST' });
+        res = await fetch(customPath, options);
+      }
       const elapsed = Math.round(performance.now() - startTime);
       setLatencyMs(elapsed);
       setResponseStatus(res.status);

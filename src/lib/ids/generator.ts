@@ -28,7 +28,8 @@ export type IdPrefix =
   | 'log'
   | 'idemp'
   | 'wrk'
-  | 'alert';
+  | 'alert'
+  | 'sess';
 
 /**
  * Generate a cryptographically secure human/debug-friendly prefixed identifier

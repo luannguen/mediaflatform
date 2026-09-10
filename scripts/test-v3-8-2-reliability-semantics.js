@@ -77,7 +77,7 @@ async function main() {
 
   // 1. Version Baseline Consistency
   await runTest('1.1 Version baseline: Runtime and API version consistency', () => {
-    assert(PLATFORM_VERSION === '3.8.2' || PLATFORM_VERSION === '3.8.3', 'Version must be 3.8.2 or 3.8.3');
+    assert(PLATFORM_VERSION === '3.8.2' || PLATFORM_VERSION === '3.8.3' || PLATFORM_VERSION === '3.8.4', 'Version must be 3.8.2, 3.8.3, or 3.8.4');
     assert.strictEqual(API_VERSION, 'v1');
     const sdkPkg = JSON.parse(fs.readFileSync(path.join(__dirname, '../packages/sdk/package.json'), 'utf8'));
     assert.strictEqual(sdkPkg.version, PLATFORM_VERSION);

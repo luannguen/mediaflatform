@@ -23,7 +23,6 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import Hls from 'hls.js';
-import { DEMO_CREDENTIALS } from './HeroSection';
 
 interface VideoAsset {
   id: string;
@@ -106,11 +105,11 @@ export function VideoStudioSection() {
   const fetchVideos = async () => {
     setLoadingVideos(true);
     try {
-      const res = await fetch('/api/v1/assets?type=video&asset_type=video&status=active&limit=24', {
-        headers: {
-          'X-Media-Api-Key': DEMO_CREDENTIALS.rawKey,
-        },
-      });
+      let res = await fetch('/api/v1/assets?type=video&asset_type=video&status=active&limit=24');
+      if (res.status === 401) {
+        await fetch('/api/v1/demo/session', { method: 'POST' });
+        res = await fetch('/api/v1/assets?type=video&asset_type=video&status=active&limit=24');
+      }
       if (!res.ok) throw new Error(`Lỗi tải danh sách video (${res.status})`);
       const json = await res.json();
       const rawList: any[] = json.data || [];
@@ -146,8 +145,7 @@ export function VideoStudioSection() {
     setCurrentBitrate(0);
     setCurrentResolution('Đang kết nối...');
 
-    const authParam = activeVideo.visibility && activeVideo.visibility !== 'public' ? `?api_key=${encodeURIComponent(DEMO_CREDENTIALS.rawKey)}` : '';
-    const masterUrl = `/api/v1/delivery/video/${activeVideo.id}/master.m3u8${authParam}`;
+    const masterUrl = `/api/v1/delivery/video/${activeVideo.id}/master.m3u8`;
 
     // Clean up previous Hls instance
     if (hlsRef.current) {
@@ -229,7 +227,6 @@ export function VideoStudioSection() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Media-Api-Key': DEMO_CREDENTIALS.rawKey,
         },
         body: JSON.stringify({ worker_id: 'web_studio_worker' }),
       });
@@ -242,9 +239,7 @@ export function VideoStudioSection() {
   const pollJobStatus = async (jobId: string, assetId: string) => {
     const pollInterval = setInterval(async () => {
       try {
-        const res = await fetch(`/api/v1/jobs/${jobId}`, {
-          headers: { 'X-Media-Api-Key': DEMO_CREDENTIALS.rawKey },
-        });
+        const res = await fetch(`/api/v1/jobs/${jobId}`);
         if (!res.ok) return;
         const json = await res.json();
         const job: JobProgress = json.data;
@@ -257,9 +252,7 @@ export function VideoStudioSection() {
           await fetchVideos();
           setActiveVideo((prev) => (prev?.id === assetId ? prev : { id: assetId, display_name: 'Đang mở...', original_filename: '', mime_type: 'video/mp4', size_bytes: 0, created_at: '' }));
           // Fetch exact asset record
-          const assetRes = await fetch(`/api/v1/assets/${assetId}`, {
-            headers: { 'X-Media-Api-Key': DEMO_CREDENTIALS.rawKey },
-          });
+          const assetRes = await fetch(`/api/v1/assets/${assetId}`);
           if (assetRes.ok) {
             const assetJson = await assetRes.json();
             setActiveVideo(assetJson.data);
@@ -285,9 +278,6 @@ export function VideoStudioSection() {
       toast.info('Đang sinh video 720p H.264/AAC trực tiếp bằng FFmpeg...');
       const res = await fetch('/api/v1/demo/sample-video', {
         method: 'POST',
-        headers: {
-          'X-Media-Api-Key': DEMO_CREDENTIALS.rawKey,
-        },
       });
 
       if (!res.ok) {
@@ -318,7 +308,7 @@ export function VideoStudioSection() {
     }
   };
 
-  // Action: Upload Video File
+  // Action: Upload Video File using Direct Upload Session (bypasses serverless payload limit)
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -336,31 +326,78 @@ export function VideoStudioSection() {
     setIsUploading(true);
     setCurrentJob(null);
     try {
-      toast.info(`Đang tải lên "${file.name}" (${(file.size / 1024 / 1024).toFixed(1)}MB)...`);
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('displayName', file.name);
+      toast.info(`Khởi tạo Direct Upload Session cho "${file.name}" (${(file.size / 1024 / 1024).toFixed(1)}MB)...`);
 
-      const res = await fetch('/api/v1/uploads', {
+      // 1. Create upload session
+      let sessionRes = await fetch('/api/v1/uploads/sessions', {
         method: 'POST',
-        headers: {
-          'X-Media-Api-Key': DEMO_CREDENTIALS.rawKey,
-        },
-        body: formData,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filename: file.name,
+          file_size: file.size,
+          mime_type: file.type || 'video/mp4',
+          display_name: file.name,
+        }),
       });
 
-      if (!res.ok) {
-        const errJson = await res.json();
-        throw new Error(errJson.error?.message || `HTTP ${res.status}`);
+      if (sessionRes.status === 401) {
+        await fetch('/api/v1/demo/session', { method: 'POST' });
+        sessionRes = await fetch('/api/v1/uploads/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            filename: file.name,
+            file_size: file.size,
+            mime_type: file.type || 'video/mp4',
+            display_name: file.name,
+          }),
+        });
       }
 
-      const json = await res.json();
-      const asset = json.data;
+      if (!sessionRes.ok) {
+        const errJson = await sessionRes.json();
+        throw new Error(errJson.error?.message || `HTTP ${sessionRes.status}`);
+      }
 
-      if (asset.job_id) {
-        toast.success('Upload thành công! Bắt đầu pipeline xử lý HLS...');
+      const sessionJson = await sessionRes.json();
+      const { session, capability } = sessionJson.data;
+
+      // 2. Direct upload to Storage Provider
+      toast.info('Đang tải video trực tiếp lên Storage Provider...');
+      const uploadHeaders: Record<string, string> = {
+        'Content-Type': file.type || 'video/mp4',
+        ...(capability.headers || {}),
+      };
+
+      const putRes = await fetch(capability.uploadUrl, {
+        method: capability.method || 'PUT',
+        headers: uploadHeaders,
+        body: file,
+      });
+
+      if (!putRes.ok && putRes.status !== 200 && putRes.status !== 201) {
+        throw new Error(`Direct upload thất bại với mã lỗi HTTP ${putRes.status}`);
+      }
+
+      // 3. Atomically finalize upload session via finalize_upload_session RPC
+      toast.info('Đang hoàn tất phiên tải lên và kích hoạt transcoding...');
+      const completeRes = await fetch(`/api/v1/uploads/sessions/${session.id}/complete`, {
+        method: 'POST',
+      });
+
+      if (!completeRes.ok) {
+        const errJson = await completeRes.json();
+        throw new Error(errJson.error?.message || `Finalize thất bại với HTTP ${completeRes.status}`);
+      }
+
+      const completeJson = await completeRes.json();
+      const asset = completeJson.data.asset;
+      const job = completeJson.data.job;
+
+      if (job?.id) {
+        toast.success('Direct Upload thành công! Bắt đầu pipeline xử lý HLS...');
         setCurrentJob({
-          id: asset.job_id,
+          id: job.id,
           status: 'queued',
           current_stage: 'queued',
           progress: 10,
@@ -370,7 +407,7 @@ export function VideoStudioSection() {
         triggerWorkerProcessing();
 
         // Poll job progress
-        pollJobStatus(asset.job_id, asset.id);
+        pollJobStatus(job.id, asset.id);
       } else {
         toast.success('Upload hoàn tất!');
         await fetchVideos();
@@ -408,9 +445,6 @@ export function VideoStudioSection() {
     try {
       const res = await fetch(`/api/v1/assets/${deleteModalAsset.id}?action=purge&force=true`, {
         method: 'DELETE',
-        headers: {
-          'X-Media-Api-Key': DEMO_CREDENTIALS.rawKey,
-        },
       });
 
       if (!res.ok) {
@@ -749,7 +783,7 @@ export function VideoStudioSection() {
                 ref={videoRef}
                 controls
                 playsInline
-                poster={`/api/v1/delivery/video/${activeVideo.id}/poster.webp${activeVideo.visibility && activeVideo.visibility !== 'public' ? `?api_key=${encodeURIComponent(DEMO_CREDENTIALS.rawKey)}` : ''}`}
+                poster={`/api/v1/delivery/video/${activeVideo.id}/poster.webp`}
                 className="w-full h-full object-contain"
                 onPlay={() => setIsPlaying(true)}
                 onPause={() => setIsPlaying(false)}
@@ -764,8 +798,7 @@ export function VideoStudioSection() {
                   <button
                     onClick={() => {
                       setPlayerError(null);
-                      const reloadAuthParam = activeVideo.visibility && activeVideo.visibility !== 'public' ? `?api_key=${encodeURIComponent(DEMO_CREDENTIALS.rawKey)}` : '';
-                      const masterUrl = `/api/v1/delivery/video/${activeVideo.id}/master.m3u8${reloadAuthParam}`;
+                      const masterUrl = `/api/v1/delivery/video/${activeVideo.id}/master.m3u8`;
                       if (hlsRef.current) {
                         hlsRef.current.loadSource(masterUrl);
                       }
@@ -923,9 +956,8 @@ export function VideoStudioSection() {
               {videos.map((v) => {
                 const isSelected = activeVideo?.id === v.id;
                 const isHovered = hoveredVideoId === v.id;
-                const authQuery = v.visibility && v.visibility !== 'public' ? `?api_key=${encodeURIComponent(DEMO_CREDENTIALS.rawKey)}` : '';
-                const posterUrl = `/api/v1/delivery/video/${v.id}/poster.webp${authQuery}`;
-                const trailerUrl = `/api/v1/delivery/video/${v.id}/trailer.webp${authQuery}`;
+                const posterUrl = `/api/v1/delivery/video/${v.id}/poster.webp`;
+                const trailerUrl = `/api/v1/delivery/video/${v.id}/trailer.webp`;
 
                 return (
                   <div
