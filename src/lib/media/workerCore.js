@@ -281,21 +281,98 @@ async function transcodeToHls(sourcePath, outputDir, targetProfiles, options = {
   };
 }
 
-async function extractPosterFrame(sourcePath, targetPath, timeSec = 1.0) {
+function runAbortableProcess(binary, args, signal, options = {}) {
+  return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) {
+      return reject(new LeaseLostError('LEASE_LOST: Process aborted before execution because worker lease was lost'));
+    }
+
+    const child = spawn(binary, args, {
+      cwd: options.cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let isDone = false;
+
+    const onAbort = () => {
+      if (isDone) return;
+      isDone = true;
+      try {
+        child.kill('SIGKILL');
+      } catch {}
+      reject(new LeaseLostError('LEASE_LOST: Subprocess killed by SIGKILL because worker lease was lost'));
+    };
+
+    if (signal) {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on('error', (err) => {
+      if (isDone) return;
+      isDone = true;
+      if (signal) signal.removeEventListener('abort', onAbort);
+      reject(err);
+    });
+
+    child.on('close', (code) => {
+      if (isDone) return;
+      isDone = true;
+      if (signal) signal.removeEventListener('abort', onAbort);
+
+      if (signal && signal.aborted) {
+        return reject(new LeaseLostError('LEASE_LOST: Subprocess terminated because worker lease was lost'));
+      }
+
+      if (code !== 0) {
+        return reject(new Error(stderr || `Process exited with code ${code}`));
+      }
+
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+async function extractPosterFrame(sourcePath, targetPath, timeSecOrSignal = 1.0, maybeSignal = null) {
+  let timeSec = 1.0;
+  let signal = maybeSignal;
+  if (typeof timeSecOrSignal === 'object' && timeSecOrSignal !== null && ('aborted' in timeSecOrSignal || 'addEventListener' in timeSecOrSignal)) {
+    signal = timeSecOrSignal;
+  } else if (typeof timeSecOrSignal === 'number') {
+    timeSec = timeSecOrSignal;
+  }
+
+  if (signal && signal.aborted) {
+    throw new LeaseLostError('LEASE_LOST: Poster extraction aborted because worker lease was lost');
+  }
+
   const parentDir = path.dirname(targetPath);
   if (!fs.existsSync(parentDir)) fs.mkdirSync(parentDir, { recursive: true });
 
   const timeStr = String(timeSec);
   try {
-    await execFileAsync(FFMPEG_PATH, [
+    await runAbortableProcess(FFMPEG_PATH, [
       '-y',
       '-ss', timeStr,
       '-i', sourcePath,
       '-vframes', '1',
       '-vf', 'scale=1280:-1',
       targetPath,
-    ]);
+    ], signal);
   } catch (ffmpegErr) {
+    if (signal && (signal.aborted || ffmpegErr.message?.includes('LEASE_LOST'))) {
+      throw ffmpegErr;
+    }
     if (sharp) {
       const fallbackBuf = await sharp({
         create: { width: 1280, height: 720, channels: 3, background: { r: 24, g: 24, b: 27 } },
@@ -309,12 +386,24 @@ async function extractPosterFrame(sourcePath, targetPath, timeSec = 1.0) {
   return fs.readFileSync(targetPath);
 }
 
-async function generateAnimatedTrailer(sourcePath, targetPath, durationSec = 3.0) {
+async function generateAnimatedTrailer(sourcePath, targetPath, durationSecOrSignal = 3.0, maybeSignal = null) {
+  let durationSec = 3.0;
+  let signal = maybeSignal;
+  if (typeof durationSecOrSignal === 'object' && durationSecOrSignal !== null && ('aborted' in durationSecOrSignal || 'addEventListener' in durationSecOrSignal)) {
+    signal = durationSecOrSignal;
+  } else if (typeof durationSecOrSignal === 'number') {
+    durationSec = durationSecOrSignal;
+  }
+
+  if (signal && signal.aborted) {
+    throw new LeaseLostError('LEASE_LOST: Animated trailer generation aborted because worker lease was lost');
+  }
+
   const parentDir = path.dirname(targetPath);
   if (!fs.existsSync(parentDir)) fs.mkdirSync(parentDir, { recursive: true });
 
   try {
-    await execFileAsync(FFMPEG_PATH, [
+    await runAbortableProcess(FFMPEG_PATH, [
       '-y',
       '-ss', '00:00:00',
       '-t', String(durationSec),
@@ -322,8 +411,11 @@ async function generateAnimatedTrailer(sourcePath, targetPath, durationSec = 3.0
       '-vf', 'fps=10,scale=480:-1:flags=lanczos',
       '-loop', '0',
       targetPath,
-    ]);
+    ], signal);
   } catch (ffmpegErr) {
+    if (signal && (signal.aborted || ffmpegErr.message?.includes('LEASE_LOST'))) {
+      throw ffmpegErr;
+    }
     if (sharp) {
       const fallbackBuf = await sharp({
         create: { width: 480, height: 270, channels: 3, background: { r: 39, g: 39, b: 42 } },
@@ -446,7 +538,7 @@ async function executePipeline(ctx) {
   });
 
   const posterPath = path.join(workDir, 'poster.webp');
-  const posterBuffer = await extractPosterFrame(sourcePath, posterPath, 1.0);
+  const posterBuffer = await extractPosterFrame(sourcePath, posterPath, 1.0, abortController.signal);
 
   await progressUpdater('preview_generation', 80, {
     stage_message: 'Generating 3s animated trailer loop from source video...',
@@ -456,7 +548,8 @@ async function executePipeline(ctx) {
   const trailerBuffer = await generateAnimatedTrailer(
     sourcePath,
     trailerPath,
-    Math.min(3.0, probeResult.durationSec > 0 ? probeResult.durationSec : 3.0)
+    Math.min(3.0, probeResult.durationSec > 0 ? probeResult.durationSec : 3.0),
+    abortController.signal
   );
 
   if (abortController.signal.aborted) {
@@ -478,57 +571,47 @@ async function executePipeline(ctx) {
   await storageUploader(posterBuffer, storagePrefix + '/poster.webp', 'image/webp');
   await storageUploader(trailerBuffer, storagePrefix + '/trailer.webp', 'image/webp');
 
-  const uploadedVariants = [];
-  for (const variant of hlsResult.variants) {
-    const variantKey = storagePrefix + '/' + variant.playlistFileName;
+  for (const v of hlsResult.variants) {
+    const variantPrefix = storagePrefix + '/' + v.profile;
     await storageUploader(
-      Buffer.from(variant.playlistContent, 'utf8'),
-      variantKey,
+      Buffer.from(v.playlistContent, 'utf8'),
+      storagePrefix + '/' + v.playlistFileName,
       'application/vnd.apple.mpegurl'
     );
 
-    for (const seg of variant.segments) {
-      const segKey = storagePrefix + '/' + variant.profile + '/' + seg.fileName;
+    for (const seg of v.segments) {
       const segBuffer = fs.readFileSync(seg.filePath);
-      await storageUploader(segBuffer, segKey, 'video/MP2T');
+      await storageUploader(segBuffer, variantPrefix + '/' + seg.fileName, 'video/MP2T');
     }
+  }
 
-    uploadedVariants.push({
-      profile: variant.profile,
-      resolution: variant.resolution,
-      bandwidth: variant.bandwidth,
-      avg_bandwidth: variant.avgBandwidth,
-      codecs: variant.codecs,
-      url: '/api/v1/delivery/video/' + asset.id + '/' + variant.playlistFileName,
-      segment_count: variant.segments.length,
-    });
+  const postUploadLease = await heartbeatRenewer();
+  if (!postUploadLease) {
+    abortController.abort();
+    throw new LeaseLostError('LEASE_LOST: Job ' + jobId + ' lease expired after storage upload');
   }
 
   const outputManifest = {
+    master_m3u8: storagePrefix + '/master.m3u8',
+    poster_webp: storagePrefix + '/poster.webp',
+    trailer_webp: storagePrefix + '/trailer.webp',
+    variants: hlsResult.variants.map((v) => ({
+      profile: v.profile,
+      resolution: v.resolution,
+      bandwidth: v.bandwidth,
+      avg_bandwidth: v.avgBandwidth,
+      codecs: v.codecs,
+      playlist: storagePrefix + '/' + v.playlistFileName,
+      segment_count: v.segments.length,
+    })),
     output_version: outputVersion,
-    master_m3u8: hlsResult.masterPlaylistContent,
-    variants: uploadedVariants,
-    poster_url: '/api/v1/delivery/video/' + asset.id + '/poster.webp',
-    trailer_url: '/api/v1/delivery/video/' + asset.id + '/trailer.webp',
-    target_profiles: targetProfiles,
-    non_upscaling_enforced: true,
-    source_height: probeResult.height,
-    source_width: probeResult.width,
-    duration_ms: probeResult.durationMs,
-    video_codec: probeResult.videoCodec,
-    audio_codec: probeResult.audioCodec,
-    fps: 30,
-    bitrate: probeResult.bitrate,
-    created_at: new Date().toISOString(),
+    transcoded_at: new Date().toISOString(),
   };
 
-  if (abortController.signal.aborted) {
-    throw new LeaseLostError('LEASE_LOST: Aborted before final publish');
-  }
-
-  const publishSuccess = await fencedPublisher(outputManifest);
-  if (!publishSuccess) {
-    throw new LeaseLostError('LEASE_LOST: Fencing failed upon atomic publish for job ' + jobId);
+  const publishOk = await fencedPublisher(outputManifest);
+  if (!publishOk) {
+    abortController.abort();
+    throw new LeaseLostError('LEASE_LOST: Fencing failed for job ' + jobId + ' upon CAS publish');
   }
 
   return outputManifest;
@@ -540,6 +623,7 @@ const mediaWorkerCore = {
   RETRYABLE_ERRORS,
   PERMANENT_ERRORS,
   LeaseLostError,
+  runAbortableProcess,
   classifyError,
   calculateNextAvailableAt,
   resolveLadderProfiles,
@@ -558,6 +642,7 @@ module.exports = {
   RETRYABLE_ERRORS,
   PERMANENT_ERRORS,
   LeaseLostError,
+  runAbortableProcess,
   classifyError,
   calculateNextAvailableAt,
   resolveLadderProfiles,

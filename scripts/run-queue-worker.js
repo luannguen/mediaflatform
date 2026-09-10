@@ -181,7 +181,7 @@ async function processJobDirect(supabase, job) {
       },
       progressUpdater: async (stage, percent, meta) => {
         const now = new Date().toISOString();
-        await supabase
+        const { data, error } = await supabase
           .from('processing_jobs')
           .update({
             current_stage: stage,
@@ -192,7 +192,16 @@ async function processJobDirect(supabase, job) {
           .eq('id', job.id)
           .eq('status', 'processing')
           .eq('locked_by', workerId)
-          .gt('lease_expires_at', now);
+          .eq('job_run_id', runId)
+          .gt('lease_expires_at', now)
+          .select('id')
+          .maybeSingle();
+
+        if (error || !data) {
+          console.warn(`[QueueDaemon] Progress update failed CAS fencing (lease lost/stolen) for job ${job.id}`);
+          abortController.abort();
+          throw new LeaseLostError(`LEASE_LOST: Fencing failed during progress update for job ${job.id}`);
+        }
       },
     });
 
@@ -208,49 +217,30 @@ async function processJobDirect(supabase, job) {
     console.error(`[QueueDaemon] Direct transcode error for job ${job.id}:`, err.message);
 
     const { taxonomy, message, isRetryable } = mediaWorkerCore.classifyError(err);
-    const now = new Date().toISOString();
     const currentAttempt = job.attempt || 1;
-    const maxAttempts = job.max_attempts || 3;
+    const backoffSeconds = currentAttempt === 1 ? 30 : currentAttempt === 2 ? 120 : 600;
 
-    if (isRetryable && currentAttempt < maxAttempts) {
-      const nextRunAt = mediaWorkerCore.calculateNextAvailableAt(currentAttempt);
-      console.log(`[QueueDaemon] Scheduling retry ${currentAttempt + 1}/${maxAttempts} for job ${job.id} at ${nextRunAt} (Error: ${taxonomy})`);
+    // Fenced Failure Mutation via atomic PostgreSQL RPC
+    const { data: failResult, error: failErr } = await supabase.rpc('fail_processing_job', {
+      p_job_id: job.id,
+      p_worker_id: workerId,
+      p_job_run_id: runId,
+      p_error_code: taxonomy,
+      p_error_message: message,
+      p_is_retryable: isRetryable,
+      p_backoff_seconds: backoffSeconds,
+      p_error_details: { attempt: currentAttempt, original_error: err.message },
+    });
 
-      await supabase
-        .from('processing_jobs')
-        .update({
-          status: 'queued',
-          current_stage: 'queued',
-          attempt: currentAttempt + 1,
-          next_run_at: nextRunAt,
-          locked_by: null,
-          lease_expires_at: null,
-          error_message: `[${taxonomy}] ${message}`,
-          updated_at: now,
-        })
-        .eq('id', job.id);
+    if (failErr || (failResult && !failResult.success)) {
+      console.warn(`[QueueDaemon] Split-brain protection: Fencing failed for fail_processing_job on ${job.id} (lease lost/stolen). Job not mutated.`);
+      return false;
+    }
+
+    if (failResult && failResult.status === 'retrying') {
+      console.log(`[QueueDaemon] Scheduled retry for job ${job.id} at ${failResult.available_at} (Attempt: ${failResult.attempt}, Error: ${taxonomy})`);
     } else {
-      console.error(`[QueueDaemon] Routing job ${job.id} to Dead Letter Queue (DLQ). Permanent/Max-retries reached. (Error: ${taxonomy})`);
-
-      await supabase
-        .from('processing_jobs')
-        .update({
-          status: 'dead_letter',
-          current_stage: 'failed',
-          locked_by: null,
-          lease_expires_at: null,
-          error_message: `[${taxonomy}] ${message}`,
-          updated_at: now,
-        })
-        .eq('id', job.id);
-
-      await supabase
-        .from('assets')
-        .update({
-          processing_status: 'failed',
-          updated_at: now,
-        })
-        .eq('id', job.asset_id);
+      console.error(`[QueueDaemon] Routed job ${job.id} to Dead Letter Queue (DLQ). (Error: ${taxonomy})`);
     }
 
     return false;

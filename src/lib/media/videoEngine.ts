@@ -1,10 +1,77 @@
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
 import sharp from 'sharp';
 
 const execFileAsync = promisify(execFile);
+
+export function runAbortableProcess(
+  binary: string,
+  args: string[],
+  signal?: AbortSignal,
+  options: { timeoutMs?: number; cwd?: string } = {}
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      return reject(new Error('LEASE_LOST: Process aborted before execution because worker lease was lost'));
+    }
+
+    const child = spawn(binary, args, {
+      cwd: options.cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let isDone = false;
+
+    const onAbort = () => {
+      if (isDone) return;
+      isDone = true;
+      try {
+        child.kill('SIGKILL');
+      } catch {}
+      reject(new Error('LEASE_LOST: Subprocess killed by SIGKILL because worker lease was lost'));
+    };
+
+    if (signal) {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on('error', (err) => {
+      if (isDone) return;
+      isDone = true;
+      if (signal) signal.removeEventListener('abort', onAbort);
+      reject(err);
+    });
+
+    child.on('close', (code) => {
+      if (isDone) return;
+      isDone = true;
+      if (signal) signal.removeEventListener('abort', onAbort);
+
+      if (signal?.aborted) {
+        return reject(new Error('LEASE_LOST: Subprocess terminated because worker lease was lost'));
+      }
+
+      if (code !== 0) {
+        return reject(new Error(stderr || `Process exited with code ${code}`));
+      }
+
+      resolve({ stdout, stderr });
+    });
+  });
+}
 
 function resolveBinary(name: 'ffmpeg' | 'ffprobe'): string {
   if (name === 'ffmpeg' && process.env.FFMPEG_PATH) return process.env.FFMPEG_PATH;
@@ -264,9 +331,9 @@ export const videoEngine = {
       ];
 
       try {
-        await execFileAsync(FFMPEG_PATH, ffmpegArgs, { signal });
+        await runAbortableProcess(FFMPEG_PATH, ffmpegArgs, signal);
       } catch (err: any) {
-        if (signal?.aborted || err.name === 'AbortError') {
+        if (signal?.aborted || err.message?.includes('LEASE_LOST') || err.name === 'AbortError') {
           throw new Error('LEASE_LOST: Transcoding aborted because worker lease was lost');
         }
         throw new Error(`TRANSCODING_FAILED: ffmpeg execution failed for profile ${profile.name} - ${err.message}`);
@@ -320,11 +387,13 @@ export const videoEngine = {
 
   /**
    * Extract high-resolution poster frame from real video frame at 1s
+   * Uses runAbortableProcess so SIGKILL is sent immediately if worker lease is lost
    */
   async extractPosterFrame(
     sourcePath: string,
     outputPath: string,
-    timestampSec: number = 1.0
+    timestampSec: number = 1.0,
+    signal?: AbortSignal
   ): Promise<Buffer> {
     const tempJpg = outputPath.replace(/\.[^.]+$/, '_temp.jpg');
 
@@ -338,29 +407,39 @@ export const videoEngine = {
     ];
 
     try {
-      await execFileAsync(FFMPEG_PATH, args);
+      await runAbortableProcess(FFMPEG_PATH, args, signal);
       const webpBuffer = await sharp(tempJpg).webp({ quality: 85 }).toBuffer();
       fs.writeFileSync(outputPath, webpBuffer);
       if (fs.existsSync(tempJpg)) fs.unlinkSync(tempJpg);
       return webpBuffer;
-    } catch {
+    } catch (err: any) {
+      if (signal?.aborted || err.message?.includes('LEASE_LOST')) {
+        if (fs.existsSync(tempJpg)) {
+          try { fs.unlinkSync(tempJpg); } catch {}
+        }
+        throw err;
+      }
       // Fallback to 0.0s frame if 1.0s fails (e.g. ultra-short clips)
       const fallbackArgs = ['-y', '-i', sourcePath, '-vframes', '1', '-vf', 'scale=1280:-1', tempJpg];
-      await execFileAsync(FFMPEG_PATH, fallbackArgs);
+      await runAbortableProcess(FFMPEG_PATH, fallbackArgs, signal);
       const webpBuffer = await sharp(tempJpg).webp({ quality: 85 }).toBuffer();
       fs.writeFileSync(outputPath, webpBuffer);
-      if (fs.existsSync(tempJpg)) fs.unlinkSync(tempJpg);
+      if (fs.existsSync(tempJpg)) {
+        try { fs.unlinkSync(tempJpg); } catch {}
+      }
       return webpBuffer;
     }
   },
 
   /**
    * Generate 3-second animated hover preview trailer from real video frames
+   * Uses runAbortableProcess so SIGKILL is sent immediately if worker lease is lost
    */
   async generateAnimatedTrailer(
     sourcePath: string,
     outputPath: string,
-    durationSec: number = 3.0
+    durationSec: number = 3.0,
+    signal?: AbortSignal
   ): Promise<Buffer> {
     const args = [
       '-y',
@@ -373,9 +452,12 @@ export const videoEngine = {
     ];
 
     try {
-      await execFileAsync(FFMPEG_PATH, args);
+      await runAbortableProcess(FFMPEG_PATH, args, signal);
       return fs.readFileSync(outputPath);
     } catch (err: any) {
+      if (signal?.aborted || err.message?.includes('LEASE_LOST')) {
+        throw err;
+      }
       throw new Error(`TRAILER_GENERATION_FAILED: ${err.message}`);
     }
   },

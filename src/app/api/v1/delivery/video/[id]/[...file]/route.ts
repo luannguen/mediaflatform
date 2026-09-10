@@ -15,7 +15,7 @@ export async function GET(
 
     let asset: any = null;
     try {
-      asset = await assetService.getAssetById(assetId);
+      asset = await assetService.getAssetGlobally(assetId);
     } catch {
       return new NextResponse('Video asset not found', { status: 404 });
     }
@@ -24,27 +24,75 @@ export async function GET(
       return new NextResponse('Video asset not found', { status: 404 });
     }
 
-    // Enforce Private Delivery Policy: requires authentication if visibility is strictly private
-    if (asset.visibility === 'private') {
+    const isPrivate = asset.visibility === 'private' || asset.visibility === 'workspace';
+
+    // Enforce Tenant-Aware Private Delivery Policy
+    if (isPrivate) {
+      let principal: any;
       try {
-        await authenticateRequest(req, 'assets:read');
+        principal = await authenticateRequest(req, 'assets:read');
       } catch {
-        return new NextResponse('Unauthorized: Private asset requires valid credentials', {
-          status: 401,
-          headers: { 'WWW-Authenticate': 'Bearer' },
-        });
+        return NextResponse.json(
+          { error: 'UNAUTHORIZED', message: 'Unauthorized: Private asset requires valid credentials' },
+          {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Bearer' },
+          }
+        );
+      }
+
+      // Strict Multi-Tenant Isolation: Tenant A cannot access Tenant B's private media
+      if (principal.workspaceId !== asset.workspace_id) {
+        return NextResponse.json(
+          { error: 'PERMISSION_DENIED', message: 'Forbidden: Cross-workspace access denied' },
+          { status: 403 }
+        );
       }
     }
 
     const baseUrl = new URL(req.url).origin;
-    const isPrivate = asset.visibility === 'private';
 
     // 1. Master HLS Playlist
     if (fileName === 'master.m3u8') {
       if (asset.processing_status === 'failed') {
-        return new NextResponse('Video processing failed', { status: 410 });
+        return NextResponse.json(
+          { error: 'PROCESSING_FAILED', message: 'Video processing failed' },
+          { status: 410 }
+        );
       }
       const playlist = await videoService.generateMasterPlaylist(assetId, baseUrl, asset);
+      if (!playlist) {
+        if (asset.processing_status === 'pending' || asset.processing_status === 'processing') {
+          return NextResponse.json(
+            {
+              error: 'TOO_EARLY',
+              message: 'Video transcoding is in progress. Please poll status or retry later.',
+              processing_status: asset.processing_status,
+            },
+            {
+              status: 425,
+              headers: { 'Retry-After': '5' },
+            }
+          );
+        }
+        if (asset.processing_status === 'ready') {
+          return NextResponse.json(
+            {
+              error: 'MEDIA_ARTIFACT_MISSING',
+              message: 'Transcoded master playlist not found in storage. Asset transcoding may be incomplete.',
+              processing_status: asset.processing_status,
+            },
+            {
+              status: 503,
+              headers: { 'Retry-After': '10' },
+            }
+          );
+        }
+        return NextResponse.json(
+          { error: 'NOT_FOUND', message: 'Master playlist not found' },
+          { status: 404 }
+        );
+      }
       return new NextResponse(playlist, {
         headers: {
           'Content-Type': 'application/vnd.apple.mpegurl',

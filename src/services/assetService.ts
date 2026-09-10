@@ -320,6 +320,23 @@ export const assetService = {
     return { ...(asset as Asset), referencesCount: refCount || 0 };
   },
 
+  /**
+   * Resolve an asset globally by ID across all workspaces (for public delivery or pre-auth routing)
+   */
+  async getAssetGlobally(id: string): Promise<Asset | null> {
+    if (!isSupabaseAdminConfigured()) {
+      return mockDb.assets.find((a) => a.id === id) || null;
+    }
+    const { data, error } = await supabaseAdmin
+      .from('assets')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (error || !data) return null;
+    return data as Asset;
+  },
+
   async createAsset(input: CreateAssetInput): Promise<Asset> {
     const id = generateId('med');
     const workspaceId = input.workspaceId || mockWorkspace.id;

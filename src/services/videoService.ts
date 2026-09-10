@@ -45,7 +45,7 @@ export const videoService = {
    * Serve HLS Master Playlist (.m3u8) directly from Storage artifacts
    * Falls back to dynamic non-upscaling ladder if processing is pending
    */
-  async generateMasterPlaylist(assetId: string, baseUrl: string = '', asset?: Asset): Promise<string> {
+  async generateMasterPlaylist(assetId: string, baseUrl: string = '', asset?: Asset): Promise<string | null> {
     const currentAsset = asset || (await assetService.getAssetById(assetId));
     const storage = getStorageProvider();
 
@@ -58,29 +58,28 @@ export const videoService = {
           return buffer.toString('utf8');
         }
       }
+
+      // Check if real master m3u8 content is embedded in asset metadata (from CAS publish manifest)
+      const assetManifestMaster = currentAsset.metadata_json?.hls?.master_m3u8 || currentAsset.metadata_json?.master_m3u8;
+      if (typeof assetManifestMaster === 'string' && assetManifestMaster.includes('#EXTM3U')) {
+        return assetManifestMaster;
+      }
     }
 
     const job = await jobQueueService.getJobByAssetId(assetId);
     if (job?.metadata_json?.output_manifest?.master_m3u8) {
-      return job.metadata_json.output_manifest.master_m3u8;
+      const keyOrContent = job.metadata_json.output_manifest.master_m3u8;
+      if (typeof keyOrContent === 'string' && keyOrContent.includes('#EXTM3U')) {
+        return keyOrContent;
+      }
+      if (typeof keyOrContent === 'string') {
+        const buf = await storage.download(keyOrContent);
+        if (buf && buf.length > 0) return buf.toString('utf8');
+      }
     }
 
-    // Pending fallback: Non-upscaling dynamic ladder
-    const host = baseUrl.replace(/\/$/, '');
-    const prefix = `${host}/api/v1/delivery/video/${assetId}`;
-    const sourceHeight = currentAsset?.height || 720;
-    const profiles = videoWorkerService.resolveLadderProfiles(sourceHeight);
-
-    let playlist = '#EXTM3U\n';
-    playlist += '#EXT-X-VERSION:6\n';
-    playlist += '#EXT-X-INDEPENDENT-SEGMENTS\n\n';
-
-    for (const profile of profiles) {
-      playlist += `#EXT-X-STREAM-INF:BANDWIDTH=${profile.bandwidth},AVERAGE-BANDWIDTH=${profile.avgBandwidth},RESOLUTION=${profile.width}x${profile.height},FRAME-RATE=30.000,CODECS="${profile.codecs}",NAME="${profile.name}"\n`;
-      playlist += `${prefix}/${profile.name}.m3u8\n\n`;
-    }
-
-    return playlist;
+    // Never synthesize a fake master playlist for pending or missing artifacts
+    return null;
   },
 
   /**

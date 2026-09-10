@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { assetService } from '@/services/assetService';
 import { analyticsService } from '@/services/analyticsService';
+import { authenticateRequest } from '@/lib/security/auth-guard';
 import sharp from 'sharp';
 import crypto from 'crypto';
 
@@ -14,9 +15,38 @@ export async function GET(
     const { id: assetId } = await params;
     const { searchParams } = new URL(req.url);
 
-    const asset = await assetService.getAssetById(assetId);
+    let asset: any = null;
+    try {
+      asset = await assetService.getAssetGlobally(assetId);
+    } catch {
+      return new NextResponse('Asset not found', { status: 404 });
+    }
+
     if (!asset || asset.status === 'deleted' || asset.status === 'trashed') {
       return new NextResponse('Asset not found', { status: 404 });
+    }
+
+    // Enforce Tenant-Aware Private Delivery Policy
+    if (asset.visibility === 'private' || asset.visibility === 'workspace') {
+      let principal: any;
+      try {
+        principal = await authenticateRequest(req, 'assets:read');
+      } catch {
+        return NextResponse.json(
+          { error: 'UNAUTHORIZED', message: 'Unauthorized: Private asset requires valid credentials' },
+          {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Bearer' },
+          }
+        );
+      }
+
+      if (principal.workspaceId !== asset.workspace_id) {
+        return NextResponse.json(
+          { error: 'PERMISSION_DENIED', message: 'Forbidden: Cross-workspace access denied' },
+          { status: 403 }
+        );
+      }
     }
 
     const widthParam = searchParams.get('w') || searchParams.get('width');

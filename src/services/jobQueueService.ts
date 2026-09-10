@@ -432,33 +432,32 @@ export const jobQueueService = {
 
     // Try Atomic Fenced CAS RPC to update both Job and Asset in a single Postgres transaction
     if (leaseContext) {
-      try {
-        const { data: published, error: rpcErr } = await supabaseAdmin.rpc('publish_transcoded_asset', {
-          p_job_id: jobId,
-          p_worker_id: leaseContext.workerId,
-          p_job_run_id: leaseContext.runId || null,
-          p_output_version: version,
-          p_output_manifest: outputManifest,
-        });
+      const { data: published, error: rpcErr } = await supabaseAdmin.rpc('publish_transcoded_asset', {
+        p_job_id: jobId,
+        p_worker_id: leaseContext.workerId,
+        p_job_run_id: leaseContext.runId || null,
+        p_output_version: version,
+        p_output_manifest: outputManifest,
+      });
 
-        if (!rpcErr && typeof published === 'boolean') {
-          if (!published) {
-            throw new LeaseLostError(`LEASE_LOST: Fencing failed for job ${jobId} upon atomic CAS publish`);
-          }
-          const { data: freshJob } = await supabaseAdmin
-            .from('processing_jobs')
-            .select()
-            .eq('id', jobId)
-            .single();
-          return freshJob as ProcessingJob;
-        }
-      } catch (err: any) {
-        if (err instanceof LeaseLostError) throw err;
-        // Fallback to fenced queries below if RPC invocation fails
+      if (rpcErr) {
+        throw AppError.internal(`CRITICAL: Atomic CAS publish failed: ${rpcErr.message}`);
       }
+
+      if (!published) {
+        throw new LeaseLostError(`LEASE_LOST: Fencing failed for job ${jobId} upon atomic CAS publish`);
+      }
+
+      const { data: freshJob } = await supabaseAdmin
+        .from('processing_jobs')
+        .select()
+        .eq('id', jobId)
+        .single();
+      return freshJob as ProcessingJob;
     }
 
-    let query = supabaseAdmin
+    // Unfenced fallback only when no leaseContext is provided (e.g. administrative force completion)
+    const { data: job, error } = await supabaseAdmin
       .from('processing_jobs')
       .update({
         status: 'completed',
@@ -472,27 +471,14 @@ export const jobQueueService = {
         metadata_json: { output_manifest: outputManifest },
       })
       .eq('id', jobId)
-      .eq('status', 'processing');
-
-    if (leaseContext) {
-      query = query
-        .eq('locked_by', leaseContext.workerId)
-        .gt('lease_expires_at', now);
-      if (leaseContext.runId) {
-        query = query.eq('job_run_id', leaseContext.runId);
-      }
-    }
-
-    const { data: job, error } = await query.select().maybeSingle();
+      .eq('status', 'processing')
+      .select()
+      .maybeSingle();
 
     if (error || !job) {
-      if (leaseContext) {
-        throw new LeaseLostError(`LEASE_LOST: Fencing failed for job ${jobId} upon completion`);
-      }
       throw AppError.internal(`Failed to complete job: ${error?.message || 'Job not in processing state'}`);
     }
 
-    // Update parent asset ONLY after verified fenced completion
     const { data: existingAsset } = await supabaseAdmin
       .from('assets')
       .select('metadata_json')
@@ -584,6 +570,38 @@ export const jobQueueService = {
     const current = await this.getJobById(jobId);
     if (!current) throw AppError.notFound(`Job ${jobId} not found`);
 
+    // Use PostgreSQL RPC fail_processing_job for atomic CAS fenced failure
+    if (leaseContext) {
+      const currentAttempt = current.attempt || 1;
+      const backoffSec = Math.round((BACKOFF_SCHEDULE_MS[currentAttempt - 1] || 600000) / 1000);
+
+      const { data: failResult, error: rpcErr } = await supabaseAdmin.rpc('fail_processing_job', {
+        p_job_id: jobId,
+        p_worker_id: leaseContext.workerId,
+        p_job_run_id: leaseContext.runId || null,
+        p_error_code: errorCode,
+        p_error_message: errorMessage,
+        p_is_retryable: isExplicitRetryable,
+        p_backoff_seconds: backoffSec,
+        p_error_details: errorDetails,
+      });
+
+      if (rpcErr) {
+        throw AppError.internal(`CRITICAL: Atomic fail_processing_job RPC failed: ${rpcErr.message}`);
+      }
+
+      if (!failResult?.success) {
+        throw new LeaseLostError(`LEASE_LOST: Fencing failed for failJob on ${jobId} (reason: ${failResult?.reason || 'LEASE_LOST'})`);
+      }
+
+      const { data: updatedJob } = await supabaseAdmin
+        .from('processing_jobs')
+        .select()
+        .eq('id', jobId)
+        .single();
+      return updatedJob as ProcessingJob;
+    }
+
     const canRetry = isExplicitRetryable && current.attempt < current.max_attempts;
     const nextStatus: JobStatus = canRetry ? 'retrying' : 'dead_letter';
     const nextStage: JobStage = canRetry ? 'queued' : current.current_stage;
@@ -592,7 +610,7 @@ export const jobQueueService = {
     const backoffMs = canRetry ? (BACKOFF_SCHEDULE_MS[current.attempt - 1] || 600000) : 0;
     const availableAt = canRetry ? new Date(Date.now() + backoffMs).toISOString() : now;
 
-    let query = supabaseAdmin
+    const { data, error } = await supabaseAdmin
       .from('processing_jobs')
       .update({
         status: nextStatus,
@@ -609,21 +627,11 @@ export const jobQueueService = {
         completed_at: canRetry ? null : now,
         updated_at: now,
       })
-      .eq('id', jobId);
-
-    if (leaseContext) {
-      query = query.eq('locked_by', leaseContext.workerId);
-      if (leaseContext.runId) {
-        query = query.eq('job_run_id', leaseContext.runId);
-      }
-    }
-
-    const { data, error } = await query.select().maybeSingle();
+      .eq('id', jobId)
+      .select()
+      .maybeSingle();
 
     if (error || !data) {
-      if (leaseContext) {
-        throw new LeaseLostError(`LEASE_LOST: Fencing failed for failJob on ${jobId}`);
-      }
       throw AppError.internal(`Failed to record job failure: ${error?.message || 'Unknown error'}`);
     }
 

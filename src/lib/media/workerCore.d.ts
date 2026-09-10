@@ -63,8 +63,14 @@ export declare const mediaWorkerCore: {
     masterPlaylistContent: string;
     variants: any[];
   }>;
-  extractPosterFrame(sourcePath: string, targetPath: string, timeSec?: number): Promise<Buffer>;
-  generateAnimatedTrailer(sourcePath: string, targetPath: string, durationSec?: number): Promise<Buffer>;
+  runAbortableProcess(
+    binary: string,
+    args: string[],
+    signal?: AbortSignal,
+    options?: { timeoutMs?: number; cwd?: string }
+  ): Promise<{ stdout: string; stderr: string }>;
+  extractPosterFrame(sourcePath: string, targetPath: string, timeSec?: number, signal?: AbortSignal): Promise<Buffer>;
+  generateAnimatedTrailer(sourcePath: string, targetPath: string, durationSec?: number, signal?: AbortSignal): Promise<Buffer>;
   stageSourceVideo(
     asset: any,
     targetPath: string,
