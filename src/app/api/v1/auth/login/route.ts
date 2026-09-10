@@ -3,6 +3,10 @@ import { createSessionToken, DEMO_USERS, SESSION_COOKIE_NAME, UserRole } from '@
 import { mockWorkspace } from '@/lib/mock/store';
 import { supabase } from '@/lib/supabase/client';
 import { isSupabaseConfigured } from '@/lib/supabase/client';
+import { resolveAuthorizedWorkspace } from '@/lib/security/workspace-resolver';
+import { workspaceService } from '@/services/workspaceService';
+import { Workspace } from '@/types/database';
+import { ErrorCodes } from '@/lib/errors/codes';
 
 export async function POST(req: NextRequest) {
   try {
@@ -112,13 +116,39 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Resolve active authorized workspace from PostgreSQL
+    let activeWorkspace: Workspace;
+    let activeRole: UserRole = userRole;
+
+    try {
+      const resolved = await resolveAuthorizedWorkspace({
+        userId,
+        userEmail,
+      });
+      activeWorkspace = resolved.workspace;
+      activeRole = resolved.role;
+    } catch (authErr: any) {
+      if (authErr.code === ErrorCodes.WORKSPACE_ACCESS_REQUIRED) {
+        // Safe auto-provisioning of dedicated personal workspace for authenticated legacy orphan user
+        const newWs = await workspaceService.createPersonalWorkspaceForUser(
+          userId,
+          userEmail,
+          userName
+        );
+        activeWorkspace = newWs;
+        activeRole = 'owner';
+      } else {
+        throw authErr;
+      }
+    }
+
     const token = await createSessionToken({
       userId,
       email: userEmail,
       name: userName,
-      role: userRole,
-      workspaceId: mockWorkspace.id,
-      organizationId: mockWorkspace.organization_id,
+      role: activeRole,
+      workspaceId: activeWorkspace.id,
+      organizationId: activeWorkspace.organization_id,
     });
 
     const response = NextResponse.json({
@@ -128,12 +158,12 @@ export async function POST(req: NextRequest) {
           id: userId,
           email: userEmail,
           name: userName,
-          role: userRole,
+          role: activeRole,
         },
         workspace: {
-          id: mockWorkspace.id,
-          name: mockWorkspace.name,
-          slug: mockWorkspace.slug,
+          id: activeWorkspace.id,
+          name: activeWorkspace.name,
+          slug: activeWorkspace.slug,
         },
       },
     });

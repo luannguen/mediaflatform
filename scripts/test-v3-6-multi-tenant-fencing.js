@@ -69,6 +69,7 @@ async function runV36Tests() {
   // ----------------------------------------------------
   console.log('--- STEP 1: Authentication & Client Setup ---');
   let cookieHeader = '';
+  let adminWorkspaceId = 'ws_default';
   try {
     const loginRes = await fetch(BASE_URL + '/api/v1/auth/login', {
       method: 'POST',
@@ -78,6 +79,8 @@ async function runV36Tests() {
     assert(loginRes.ok, 'Admin authenticated successfully (HTTP ' + loginRes.status + ')');
     const setCookies = loginRes.headers.getSetCookie ? loginRes.headers.getSetCookie() : [loginRes.headers.get('set-cookie')];
     cookieHeader = setCookies.map((c) => c?.split(';')[0]).filter(Boolean).join('; ');
+    const loginJson = await loginRes.json().catch(() => ({}));
+    adminWorkspaceId = loginJson.data?.workspace?.id || loginJson.data?.user?.workspace_id || 'ws_default';
   } catch (err) {
     assert(false, 'Admin login failed: ' + err.message);
     return;
@@ -336,8 +339,8 @@ async function runV36Tests() {
   const testPrivateAssetId = 'med_v36_private_' + Date.now();
 
   try {
-    // Create private asset in workspace 'ws_default'
-    await supabase.from('assets').insert(buildAssetFixture(testPrivateAssetId, 'ws_default', 'private', 'processing'));
+    // Create private asset in authenticated admin workspace
+    await supabase.from('assets').insert(buildAssetFixture(testPrivateAssetId, adminWorkspaceId, 'private', 'processing'));
 
     // 6.1 Unauthenticated request -> HTTP 401 Unauthorized
     const unauthRes = await fetch(BASE_URL + '/api/v1/delivery/video/' + testPrivateAssetId + '/master.m3u8');
@@ -371,10 +374,10 @@ async function runV36Tests() {
     assert(crossTenantImgRes.status === 403, 'Cross-tenant request to private image route returns HTTP 403 (Actual: ' + crossTenantImgRes.status + ')');
     assert(crossTenantImgJson.error === 'PERMISSION_DENIED', 'Cross-tenant image error code is PERMISSION_DENIED');
 
-    // 6.3 Legitimate Tenant Request from ws_default -> Passes authorization boundary
+    // 6.3 Legitimate Tenant Request from adminWorkspaceId -> Passes authorization boundary
     const legitTenantHeaders = {
       Cookie: cookieHeader,
-      'X-Workspace-Id': 'ws_default',
+      'X-Workspace-Id': adminWorkspaceId,
     };
 
     const legitTenantRes = await fetch(BASE_URL + '/api/v1/delivery/video/' + testPrivateAssetId + '/master.m3u8', {
@@ -382,7 +385,7 @@ async function runV36Tests() {
     });
     assert(legitTenantRes.status === 425, 'Legitimate tenant access passes authorization boundary (Status: ' + legitTenantRes.status + ', not 401/403)');
 
-    // Also test with Admin Session Cookie (belongs to ws_default)
+    // Also test with Admin Session Cookie (belongs to adminWorkspaceId)
     const sessionRes = await fetch(BASE_URL + '/api/v1/delivery/video/' + testPrivateAssetId + '/master.m3u8', {
       headers: { Cookie: cookieHeader },
     });

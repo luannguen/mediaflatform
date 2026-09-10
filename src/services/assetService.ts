@@ -4,6 +4,7 @@ import { ErrorCodes } from '@/lib/errors/codes';
 import { generateId } from '@/lib/ids/generator';
 import { isSupabaseAdminConfigured, supabaseAdmin } from '@/lib/supabase/admin';
 import { mockDb, mockWorkspace } from '@/lib/mock/store';
+import { isPersistentMode, isMockModeAllowed } from '@/lib/platform/persistence-mode';
 import { getStorageProvider } from '@/lib/storage/factory';
 import { webhookService } from '@/services/webhookService';
 import { purgeService } from '@/services/purgeService';
@@ -384,14 +385,19 @@ export const assetService = {
     };
 
     let resultAsset = asset;
-    if (!isSupabaseAdminConfigured()) {
-      mockDb.assets.unshift(asset);
-    } else {
+    if (isPersistentMode() && isSupabaseAdminConfigured()) {
       const { data, error } = await supabaseAdmin.from('assets').insert(asset).select().single();
       if (error) {
         throw AppError.internal(`Failed to insert asset: ${error.message}`);
       }
       resultAsset = data as Asset;
+    } else if (isMockModeAllowed()) {
+      mockDb.assets.unshift(asset);
+    } else {
+      throw AppError.internal(
+        'Persistent database backend is required in production environment. Silent mock fallback is forbidden.',
+        ErrorCodes.PERSISTENCE_ERROR
+      );
     }
 
     // Trigger outbound webhook event

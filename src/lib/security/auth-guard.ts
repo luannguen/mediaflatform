@@ -4,6 +4,7 @@ import { SESSION_COOKIE_NAME, verifySessionToken, UserRole } from '@/lib/auth/se
 import { mockWorkspace } from '@/lib/mock/store';
 import { AppError } from '@/lib/errors/app-error';
 import { ErrorCodes } from '@/lib/errors/codes';
+import { resolveAuthorizedWorkspace } from '@/lib/security/workspace-resolver';
 
 export interface AuthPrincipal {
   type: 'api_key' | 'user' | 'worker_service' | 'anonymous_dev';
@@ -14,6 +15,8 @@ export interface AuthPrincipal {
   userId?: string;
   role?: UserRole;
   workerId?: string;
+  organizationId?: string;
+  sessionNeedsRefresh?: boolean;
 }
 
 export const WORKER_ALLOWED_SCOPES = [
@@ -99,7 +102,16 @@ export async function authenticateRequest(
   const session = await verifySessionToken(sessionCookie);
 
   if (session) {
-    const scopes = ROLE_DEFAULT_SCOPES[session.role] || ['assets:read'];
+    // Authorize workspace & resolve current authoritative role directly from PostgreSQL
+    const resolved = await resolveAuthorizedWorkspace({
+      userId: session.userId,
+      userEmail: session.email,
+      requestedWorkspaceId: session.workspaceId,
+    });
+
+    const realRole = resolved.role;
+    const realWorkspaceId = resolved.workspace.id;
+    const scopes = ROLE_DEFAULT_SCOPES[realRole] || ['assets:read'];
 
     // Enforce required scope if specified
     if (requiredScope) {
@@ -114,7 +126,7 @@ export async function authenticateRequest(
 
       if (!isAllowed) {
         throw AppError.forbidden(
-          `Permission denied: Role [${session.role}] lacks required scope [${requiredScope}]`,
+          `Permission denied: Role [${realRole}] lacks required scope [${requiredScope}]`,
           ErrorCodes.PERMISSION_DENIED
         );
       }
@@ -123,9 +135,14 @@ export async function authenticateRequest(
     return {
       type: 'user',
       userId: session.userId,
-      role: session.role,
-      workspaceId: session.workspaceId || mockWorkspace.id,
+      role: realRole,
+      workspaceId: realWorkspaceId,
+      organizationId: resolved.workspace.organization_id,
       scopes,
+      sessionNeedsRefresh:
+        Boolean(resolved.sessionNeedsRefresh) ||
+        realWorkspaceId !== session.workspaceId ||
+        realRole !== session.role,
     };
   }
 

@@ -46,6 +46,7 @@ async function runV35Tests() {
   // ----------------------------------------------------
   console.log('--- STEP 1: Authentication & Client Setup ---');
   let cookieHeader = '';
+  let adminWorkspaceId = 'ws_default';
   try {
     const loginRes = await fetch(BASE_URL + '/api/v1/auth/login', {
       method: 'POST',
@@ -55,6 +56,8 @@ async function runV35Tests() {
     assert(loginRes.ok, 'Admin authenticated successfully (HTTP ' + loginRes.status + ')');
     const setCookies = loginRes.headers.getSetCookie ? loginRes.headers.getSetCookie() : [loginRes.headers.get('set-cookie')];
     cookieHeader = setCookies.map((c) => c?.split(';')[0]).filter(Boolean).join('; ');
+    const loginJson = await loginRes.json().catch(() => ({}));
+    adminWorkspaceId = loginJson.data?.workspace?.id || loginJson.data?.user?.workspace_id || 'ws_default';
   } catch (err) {
     assert(false, 'Admin login failed: ' + err.message);
     return;
@@ -96,26 +99,32 @@ async function runV35Tests() {
   const futureLease = new Date(Date.now() + 300000).toISOString();
 
   // Insert test asset with all required non-null fields
-  const { error: aErr } = await supabase.from('assets').insert({
-    id: testAssetId,
-    workspace_id: 'ws_default',
-    display_name: 'CAS Test Video',
-    original_filename: 'cas_test.mp4',
-    extension: 'mp4',
-    asset_type: 'video',
-    storage_key: 'test/cas.mp4',
-    mime_type: 'video/mp4',
-    size_bytes: 1000,
-    processing_status: 'processing',
-    visibility: 'public',
-  });
+  let aErr = null;
+  for (let retry = 0; retry < 3; retry++) {
+    const res = await supabase.from('assets').insert({
+      id: testAssetId,
+      workspace_id: adminWorkspaceId,
+      display_name: 'CAS Test Video',
+      original_filename: 'cas_test.mp4',
+      extension: 'mp4',
+      asset_type: 'video',
+      storage_key: 'test/cas.mp4',
+      mime_type: 'video/mp4',
+      size_bytes: 1000,
+      processing_status: 'processing',
+      visibility: 'public',
+    });
+    aErr = res.error;
+    if (!aErr) break;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
   if (aErr) console.error('Asset insert error:', aErr);
 
   // Insert test processing job
   const { error: jErr } = await supabase.from('processing_jobs').insert({
     id: testJobId,
     asset_id: testAssetId,
-    workspace_id: 'ws_default',
+    workspace_id: adminWorkspaceId,
     job_type: 'video_transcode',
     status: 'processing',
     current_stage: 'transcoding',
@@ -161,7 +170,7 @@ async function runV35Tests() {
   const privateAssetId = 'med_priv_' + Date.now().toString(36);
   await supabase.from('assets').insert({
     id: privateAssetId,
-    workspace_id: 'ws_default',
+    workspace_id: adminWorkspaceId,
     display_name: 'Confidential Executive Briefing',
     original_filename: 'confidential_briefing.mp4',
     extension: 'mp4',
@@ -195,7 +204,7 @@ async function runV35Tests() {
 
   // 4B. Authenticated request to private master playlist -> Must be 200
   const authMasterRes = await fetch(BASE_URL + '/api/v1/delivery/video/' + privateAssetId + '/master.m3u8', {
-    headers: { 'Cookie': cookieHeader },
+    headers: { 'Cookie': cookieHeader, 'X-Workspace-Id': adminWorkspaceId },
   });
   assert(authMasterRes.status === 200, 'Authenticated GET private master.m3u8 returned HTTP 200 (got: ' + authMasterRes.status + ')');
   assert(authMasterRes.headers.get('cache-control')?.includes('private'), 'Private asset delivery sets Cache-Control: private, no-cache');
@@ -208,7 +217,7 @@ async function runV35Tests() {
 
   // 4D. Authenticated request to private segment -> Must be 307 Redirect with Signed Download URL
   const authSegRes = await fetch(BASE_URL + '/api/v1/delivery/video/' + privateAssetId + '/720p/000.ts', {
-    headers: { 'Cookie': cookieHeader },
+    headers: { 'Cookie': cookieHeader, 'X-Workspace-Id': adminWorkspaceId },
     redirect: 'manual',
   });
   assert(authSegRes.status === 307, 'Authenticated GET private segment returned HTTP 307 Redirect (got: ' + authSegRes.status + ')');

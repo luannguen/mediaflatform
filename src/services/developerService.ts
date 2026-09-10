@@ -6,16 +6,23 @@ import { generateApiKey, verifyApiKeyHash, hasScope } from '@/lib/security/api-k
 import { validateRequestedScopes } from '@/lib/security/scopeRegistry';
 import { isSupabaseAdminConfigured, supabaseAdmin } from '@/lib/supabase/admin';
 import { mockDb, mockWorkspace } from '@/lib/mock/store';
+import { isPersistentMode, isMockModeAllowed } from '@/lib/platform/persistence-mode';
 
 export const developerService = {
   async listApplications(workspaceId: string = mockWorkspace.id): Promise<Application[]> {
-    if (isSupabaseAdminConfigured()) {
-      try {
-        const { data, error } = await supabaseAdmin.from('applications').select('*').eq('workspace_id', workspaceId);
-        if (!error && data) return data as Application[];
-      } catch {
-        // Fallback to in-memory mock store
+    if (isPersistentMode() && isSupabaseAdminConfigured()) {
+      const { data, error } = await supabaseAdmin.from('applications').select('*').eq('workspace_id', workspaceId);
+      if (error) {
+        throw AppError.internal(`Failed to list applications from database: ${error.message}`, ErrorCodes.INTERNAL_ERROR);
       }
+      return (data as Application[]) || [];
+    }
+
+    if (!isMockModeAllowed()) {
+      throw AppError.internal(
+        'Persistent database backend is required in production environment. Silent mock fallback is forbidden.',
+        ErrorCodes.PERSISTENCE_ERROR
+      );
     }
     return mockDb.applications.filter((a) => a.workspace_id === workspaceId);
   },
@@ -25,7 +32,7 @@ export const developerService = {
     input: { name: string; slug?: string; description?: string; environment?: 'development' | 'staging' | 'production' }
   ): Promise<Application> {
     const id = generateId('app');
-    const slug = input.slug || input.name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+    const slug = input.slug || input.name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-');
     const now = new Date().toISOString();
 
     const app: Application = {
@@ -43,13 +50,19 @@ export const developerService = {
       updated_at: now,
     };
 
-    if (isSupabaseAdminConfigured()) {
-      try {
-        const { data, error } = await supabaseAdmin.from('applications').insert(app).select().single();
-        if (!error && data) return data as Application;
-      } catch {
-        // Fallback
+    if (isPersistentMode() && isSupabaseAdminConfigured()) {
+      const { data, error } = await supabaseAdmin.from('applications').insert(app).select().single();
+      if (error) {
+        throw AppError.internal(`Failed to persist application in PostgreSQL: ${error.message}`, ErrorCodes.INTERNAL_ERROR);
       }
+      return data as Application;
+    }
+
+    if (!isMockModeAllowed()) {
+      throw AppError.internal(
+        'Persistent database backend is required in production environment. Silent mock fallback is forbidden.',
+        ErrorCodes.PERSISTENCE_ERROR
+      );
     }
 
     mockDb.applications.push(app);
@@ -57,15 +70,21 @@ export const developerService = {
   },
 
   async listServiceAccounts(workspaceId: string = mockWorkspace.id, applicationId?: string): Promise<ServiceAccount[]> {
-    if (isSupabaseAdminConfigured()) {
-      try {
-        let query = supabaseAdmin.from('service_accounts').select('*').eq('workspace_id', workspaceId);
-        if (applicationId) query = query.eq('application_id', applicationId);
-        const { data, error } = await query;
-        if (!error && data) return data as ServiceAccount[];
-      } catch {
-        // Fallback
+    if (isPersistentMode() && isSupabaseAdminConfigured()) {
+      let query = supabaseAdmin.from('service_accounts').select('*').eq('workspace_id', workspaceId);
+      if (applicationId) query = query.eq('application_id', applicationId);
+      const { data, error } = await query;
+      if (error) {
+        throw AppError.internal(`Failed to list service accounts from database: ${error.message}`, ErrorCodes.INTERNAL_ERROR);
       }
+      return (data as ServiceAccount[]) || [];
+    }
+
+    if (!isMockModeAllowed()) {
+      throw AppError.internal(
+        'Persistent database backend is required in production environment. Silent mock fallback is forbidden.',
+        ErrorCodes.PERSISTENCE_ERROR
+      );
     }
 
     let list = mockDb.serviceAccounts.filter((s) => s.workspace_id === workspaceId);
@@ -92,13 +111,19 @@ export const developerService = {
       updated_at: now,
     };
 
-    if (isSupabaseAdminConfigured()) {
-      try {
-        const { data, error } = await supabaseAdmin.from('service_accounts').insert(svc).select().single();
-        if (!error && data) return data as ServiceAccount;
-      } catch {
-        // Fallback
+    if (isPersistentMode() && isSupabaseAdminConfigured()) {
+      const { data, error } = await supabaseAdmin.from('service_accounts').insert(svc).select().single();
+      if (error) {
+        throw AppError.internal(`Failed to persist service account in PostgreSQL: ${error.message}`, ErrorCodes.INTERNAL_ERROR);
       }
+      return data as ServiceAccount;
+    }
+
+    if (!isMockModeAllowed()) {
+      throw AppError.internal(
+        'Persistent database backend is required in production environment. Silent mock fallback is forbidden.',
+        ErrorCodes.PERSISTENCE_ERROR
+      );
     }
 
     mockDb.serviceAccounts.push(svc);
@@ -137,17 +162,23 @@ export const developerService = {
   },
 
   async listApiKeys(workspaceId: string = mockWorkspace.id): Promise<Omit<ApiKey, 'key_hash'>[]> {
-    if (isSupabaseAdminConfigured()) {
-      try {
-        const { data, error } = await supabaseAdmin
-          .from('api_keys')
-          .select('id, workspace_id, service_account_id, name, key_prefix, scopes, status, expires_at, last_used_at, created_at, revoked_at')
-          .eq('workspace_id', workspaceId)
-          .order('created_at', { ascending: false });
-        if (!error && data) return data as Omit<ApiKey, 'key_hash'>[];
-      } catch {
-        // Fallback
+    if (isPersistentMode() && isSupabaseAdminConfigured()) {
+      const { data, error } = await supabaseAdmin
+        .from('api_keys')
+        .select('id, workspace_id, service_account_id, name, key_prefix, scopes, status, expires_at, last_used_at, created_at, revoked_at')
+        .eq('workspace_id', workspaceId)
+        .order('created_at', { ascending: false });
+      if (error) {
+        throw AppError.internal(`Failed to list API keys from database: ${error.message}`, ErrorCodes.INTERNAL_ERROR);
       }
+      return (data as Omit<ApiKey, 'key_hash'>[]) || [];
+    }
+
+    if (!isMockModeAllowed()) {
+      throw AppError.internal(
+        'Persistent database backend is required in production environment. Silent mock fallback is forbidden.',
+        ErrorCodes.PERSISTENCE_ERROR
+      );
     }
 
     return mockDb.apiKeys
@@ -169,7 +200,7 @@ export const developerService = {
     environment: 'development' | 'staging' | 'production' = 'production'
   ): Promise<{ rawKey: string; keyRecord: Omit<ApiKey, 'key_hash'> }> {
     // 1. Verify service account exists and belongs to workspace
-    if (isSupabaseAdminConfigured()) {
+    if (isPersistentMode() && isSupabaseAdminConfigured()) {
       const { data: svc, error: svcErr } = await supabaseAdmin
         .from('service_accounts')
         .select('id, workspace_id')
@@ -182,7 +213,7 @@ export const developerService = {
           ErrorCodes.VALIDATION_ERROR
         );
       }
-    } else {
+    } else if (isMockModeAllowed()) {
       const svc = mockDb.serviceAccounts.find((s) => s.id === serviceAccountId && s.workspace_id === workspaceId);
       if (!svc) {
         throw AppError.badRequest(
@@ -190,6 +221,11 @@ export const developerService = {
           ErrorCodes.VALIDATION_ERROR
         );
       }
+    } else {
+      throw AppError.internal(
+        'Persistent database backend is required in production environment. Silent mock fallback is forbidden.',
+        ErrorCodes.PERSISTENCE_ERROR
+      );
     }
 
     // 2. Validate requested scopes against Scope Registry
@@ -218,16 +254,20 @@ export const developerService = {
       created_at: now,
     };
 
-    if (isSupabaseAdminConfigured()) {
-      try {
-        const { data, error } = await supabaseAdmin.from('api_keys').insert(apiKeyRecord).select().single();
-        if (!error && data) {
-          const { key_hash, ...safeRecord } = data as ApiKey;
-          return { rawKey, keyRecord: safeRecord };
-        }
-      } catch {
-        // Fallback
+    if (isPersistentMode() && isSupabaseAdminConfigured()) {
+      const { data, error } = await supabaseAdmin.from('api_keys').insert(apiKeyRecord).select().single();
+      if (error) {
+        throw AppError.internal(`Failed to persist API key in PostgreSQL: ${error.message}`, ErrorCodes.INTERNAL_ERROR);
       }
+      const { key_hash, ...safeRecord } = data as ApiKey;
+      return { rawKey, keyRecord: safeRecord };
+    }
+
+    if (!isMockModeAllowed()) {
+      throw AppError.internal(
+        'Persistent database backend is required in production environment. Silent mock fallback is forbidden.',
+        ErrorCodes.PERSISTENCE_ERROR
+      );
     }
 
     mockDb.apiKeys.push(apiKeyRecord);

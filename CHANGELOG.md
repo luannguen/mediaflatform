@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.8.3] - 2026-09-10
+
+### Fixed & Hardened (Workspace Persistence & Production Identity Integrity)
+- **Eliminated Ghost Workspace & FK Constraint Violations**:
+  - Replaced in-memory `mockDb` workspace manipulation in `src/services/workspaceService.ts` with 100% database-backed PostgreSQL persistence via `supabaseAdmin`.
+  - Added atomic PostgreSQL RPC `provision_workspace_for_user(...)` ensuring workspace, owner membership, and default root folder (`General Media`) are created in a single ACID transaction.
+  - Added deterministic unique slug collision resolution using random hash suffixes.
+- **Central Authorization Resolver & Strict Tenant Isolation**:
+  - Implemented `resolveAuthorizedWorkspace()` as the single authority for workspace tenant resolution:
+    - Queries active memberships in `workspace_memberships` table.
+    - Authoritative role directly derived from PostgreSQL DB membership `role_id` (DB role wins over session cache).
+    - Strictly rejects cross-tenant access attempts with `403 WORKSPACE_ACCESS_DENIED`.
+    - Automatically heals ghost cookies to the user's real personal workspace.
+    - Strictly forbids universal `ws_default` fallback or mass granting.
+- **Auth Guard & Session Cookie Self-Healing**:
+  - Upgraded `authenticateRequest()` in `auth-guard.ts` to validate real DB membership before returning user principal.
+  - Upgraded `GET /api/v1/auth/me` to automatically re-issue fresh `mda_session` cookie containing verified workspace and DB role when stale/ghost cookies are detected.
+  - Removed deceptive UI fallback `activeWs?.id || mockWorkspace.id`.
+- **Production Silent Mock Fallback Removal**:
+  - Implemented centralized policy in `src/lib/platform/persistence-mode.ts` (`isPersistentMode`, `isMockModeAllowed`, `assertPersistentBackend`).
+  - Audited and eliminated silent mock fallbacks in `folderService.ts` and `developerService.ts`: DB errors throw explicit `AppError.internal` with standardized error codes.
+  - Added cross-tenant parent folder validation to `folderService.createFolder`.
+- **Upload Storage Compensation**:
+  - Implemented atomic compensation in `POST /api/v1/uploads`: if asset record insertion or downstream processing fails after storage upload, the uploaded storage key is automatically deleted, preventing permanent storage leaks.
+- **Safe Database Migration & Backfill**:
+  - Executed `scripts/migrate-v3-8-3-workspace-persistence.js`:
+    - Deployed `provision_workspace_for_user` stored procedure and unique index on `workspace_memberships(workspace_id, user_id)`.
+    - Repaired legacy orphan user `812a5283-dd7b-4381-8356-d98bd495f450` (`luan0891`) with dedicated personal workspace `ws_user_812a5283`.
+    - Preserved configured platform Super Admin membership on `ws_default`.
+    - Repaired all orphan identities with zero cross-tenant bleeding.
+
+---
+
 ## [3.8.2] - 2026-09-10
 
 ### Added

@@ -8,14 +8,15 @@ const SwaggerParser = require('@apidevtools/swagger-parser');
 
 // Load openApiSpec
 const { openApiSpec } = require('../src/openapi/spec.ts');
+const { PLATFORM_VERSION } = require('../src/lib/platform/version.ts');
 
 async function validateOpenApi() {
   console.log('\n--- Validating OpenAPI 3.1 Specification ---');
 
   // 1. Basic Specification Metadata
   assert.strictEqual(openApiSpec.openapi, '3.1.0', 'Must be OpenAPI 3.1.0');
-  assert.strictEqual(openApiSpec.info.version, '3.8.2', 'Spec version must match release 3.8.2');
-  console.log('✅ Spec metadata verified: version 3.8.2 (OpenAPI 3.1.0)');
+  assert.strictEqual(openApiSpec.info.version, PLATFORM_VERSION, `Spec version must match release ${PLATFORM_VERSION}`);
+  console.log(`✅ Spec metadata verified: version ${PLATFORM_VERSION} (OpenAPI 3.1.0)`);
 
   // 2. SwaggerParser Parse & Dereference without external network call
   const clonedSpec = JSON.parse(JSON.stringify(openApiSpec));
