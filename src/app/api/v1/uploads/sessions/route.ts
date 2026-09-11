@@ -29,7 +29,7 @@ export async function POST(req: NextRequest) {
     }
 
     const filename = body.filename || body.file_name || body.original_filename;
-    const fileSizeBytes = Number(body.file_size ?? body.size_bytes ?? body.fileSizeBytes);
+    const fileSizeBytes = Number(body.file_size ?? body.size_bytes ?? body.fileSizeBytes ?? body.file_size_bytes);
     const mimeType = body.mime_type || body.mimeType || 'application/octet-stream';
     const folderId = body.folder_id || body.folderId || null;
     const displayName = body.display_name || body.displayName;

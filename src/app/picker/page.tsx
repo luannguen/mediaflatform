@@ -100,26 +100,58 @@ function MediaPickerContent() {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (apiKey) headers['X-Media-Api-Key'] = apiKey;
 
-      const sessionRes = await fetch('/api/v1/uploads', {
+      // 1. Initialize Direct Upload Session
+      const sessionRes = await fetch('/api/v1/uploads/sessions', {
         method: 'POST',
         headers,
         body: JSON.stringify({
-          original_filename: file.name,
+          filename: file.name,
           mime_type: file.type || 'application/octet-stream',
-          size_bytes: file.size,
+          file_size: file.size,
           display_name: file.name,
           visibility: 'public',
         }),
       });
 
-      const sessionData = await sessionRes.json();
-      if (!sessionRes.ok) throw new Error(sessionData.error?.message || 'Upload failed');
+      const sessionJson = await sessionRes.json();
+      if (!sessionRes.ok) throw new Error(sessionJson.error?.message || sessionJson.message || 'Upload session initialization failed');
+
+      const { session, capability } = sessionJson.data || sessionJson;
+      if (!session?.id || !capability?.uploadUrl) {
+        throw new Error('Upload session or capability missing');
+      }
+
+      // 2. Direct Storage Upload
+      const uploadRes = await fetch(capability.uploadUrl, {
+        method: capability.method || 'PUT',
+        headers: {
+          'Content-Type': file.type || 'application/octet-stream',
+          ...(capability.headers || {}),
+        },
+        body: file,
+      });
+
+      if (!uploadRes.ok) {
+        throw new Error(`Direct storage upload failed with status ${uploadRes.status}`);
+      }
+
+      // 3. Finalize Upload Session
+      const completeRes = await fetch(`/api/v1/uploads/sessions/${session.id}/complete`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({}),
+      });
+
+      const completeJson = await completeRes.json();
+      if (!completeRes.ok) throw new Error(completeJson.error?.message || completeJson.message || 'Upload completion failed');
+
+      const createdAsset = completeJson.data?.asset || completeJson.asset;
 
       toast.success(`Uploaded ${file.name}`);
       await fetchAssets();
 
-      if (sessionData.data?.asset) {
-        toggleSelect(sessionData.data.asset);
+      if (createdAsset) {
+        toggleSelect(createdAsset);
       }
     } catch (err: any) {
       toast.error(err.message || 'Upload failed');
