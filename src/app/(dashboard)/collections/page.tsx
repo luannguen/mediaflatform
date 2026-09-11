@@ -25,14 +25,16 @@ export default function CollectionsPage() {
     setCreating(false);
   };
 
-  const handleDelete = async (e: React.MouseEvent, id: string, colName: string) => {
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
+  const handleDelete = async (e: React.MouseEvent, id: string) => {
     e.preventDefault();
     e.stopPropagation();
-    if (!window.confirm(`Are you sure you want to delete collection "${colName}"?`)) return;
 
     setDeletingId(id);
     await deleteCollection(id);
     setDeletingId(null);
+    setConfirmDeleteId(null);
   };
 
   return (
@@ -100,14 +102,36 @@ export default function CollectionsPage() {
                     </div>
                   </div>
 
-                  <button
-                    onClick={(e) => handleDelete(e, col.id, col.name)}
-                    disabled={deletingId === col.id}
-                    title="Delete collection"
-                    className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-950/30 transition opacity-0 group-hover:opacity-100 flex-shrink-0"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
+                  {confirmDeleteId === col.id ? (
+                    <div className="flex items-center gap-1.5 flex-shrink-0 bg-slate-950/90 border border-rose-800/60 rounded-lg px-2 py-1 z-10" onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}>
+                      <span className="text-[11px] text-rose-300 font-medium">Delete?</span>
+                      <button
+                        onClick={(e) => handleDelete(e, col.id)}
+                        disabled={deletingId === col.id}
+                        className="text-[11px] font-semibold text-rose-400 hover:text-rose-200 px-1 py-0.5 rounded transition"
+                      >
+                        {deletingId === col.id ? '...' : 'Yes'}
+                      </button>
+                      <button
+                        onClick={(e) => { e.preventDefault(); e.stopPropagation(); setConfirmDeleteId(null); }}
+                        className="text-[11px] text-slate-400 hover:text-slate-200 px-1 py-0.5 rounded transition"
+                      >
+                        No
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setConfirmDeleteId(col.id);
+                      }}
+                      title="Delete collection"
+                      className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-950/30 transition opacity-0 group-hover:opacity-100 flex-shrink-0"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  )}
                 </div>
 
                 {col.description && (
