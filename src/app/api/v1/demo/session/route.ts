@@ -30,6 +30,22 @@ export async function POST(req: NextRequest) {
       if (ws) {
         workspaceId = ws.id;
         organizationId = ws.organization_id;
+
+        // Ensure demo user has active membership in this workspace in PostgreSQL
+        const demoUserId = `usr_demo_${role}`;
+        await supabaseAdmin.from('workspace_memberships').upsert(
+          {
+            id: `mem_demo_${role}_${workspaceId}`,
+            workspace_id: workspaceId,
+            user_id: demoUserId,
+            user_email: demoUser.email,
+            user_name: demoUser.name,
+            role_id: `role_${role}`,
+            role: demoUser.role,
+            status: 'active',
+          },
+          { onConflict: 'workspace_id,user_id' }
+        );
       }
     }
 

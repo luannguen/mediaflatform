@@ -64,16 +64,19 @@ export default function FoldersPage() {
       ) : folders.length > 0 ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
           {folders.map((f) => (
-            <div
+            <Link
               key={f.id}
-              className="p-4 rounded-xl bg-slate-900 border border-slate-800 hover:border-violet-500/40 transition flex flex-col justify-between"
+              href={`/library?folder_id=${f.id}`}
+              className="group p-4 rounded-xl bg-slate-900 border border-slate-800 hover:border-violet-500/60 hover:bg-slate-900/80 hover:shadow-lg hover:shadow-violet-950/20 transition-all flex flex-col justify-between cursor-pointer"
             >
               <div className="flex items-start gap-3">
-                <div className="p-2.5 rounded-lg bg-violet-600/10 text-violet-400">
+                <div className="p-2.5 rounded-lg bg-violet-600/10 text-violet-400 group-hover:bg-violet-600/20 group-hover:text-violet-300 transition-colors">
                   <FolderIcon className="h-5 w-5" />
                 </div>
                 <div className="min-w-0 flex-1">
-                  <h3 className="text-sm font-semibold text-slate-200 truncate">{f.name}</h3>
+                  <h3 className="text-sm font-semibold text-slate-200 group-hover:text-white truncate transition-colors">
+                    {f.name}
+                  </h3>
                   <span className="text-xs font-mono text-slate-400 block mt-0.5">{f.id}</span>
                 </div>
               </div>
@@ -82,15 +85,12 @@ export default function FoldersPage() {
                 <span className="text-slate-400">
                   {new Date(f.created_at).toLocaleDateString()}
                 </span>
-                <Link
-                  href={`/library?folder_id=${f.id}`}
-                  className="text-violet-400 hover:text-violet-300 flex items-center gap-1 font-medium"
-                >
+                <span className="text-violet-400 group-hover:text-violet-300 flex items-center gap-1 font-medium transition-colors">
                   <span>Open Folder</span>
-                  <ArrowRight className="h-3 w-3" />
-                </Link>
+                  <ArrowRight className="h-3 w-3 group-hover:translate-x-1 transition-transform" />
+                </span>
               </div>
-            </div>
+            </Link>
           ))}
         </div>
       ) : (

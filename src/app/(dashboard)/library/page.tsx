@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, Suspense } from 'react';
+import { useSearchParams, useRouter } from 'next/navigation';
 import { useAssets } from '@/hooks/useAssets';
 import { useFolders } from '@/hooks/useFolders';
 import { AssetCard } from '@/components/media/AssetCard';
@@ -9,19 +10,31 @@ import { Asset, AssetType } from '@/types/database';
 import {
   LayoutGrid,
   List,
-  Filter,
   FolderTree,
   Image as ImageIcon,
   Video,
   FileText,
-  Search,
+  X,
 } from 'lucide-react';
 
-export default function LibraryPage() {
-  const { assets, total, loading, filters, setFilters, trashAsset, purgeAsset } = useAssets();
+function LibraryContent() {
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const folderIdFromUrl = searchParams.get('folder_id');
+
+  const { assets, total, loading, filters, setFilters, trashAsset, purgeAsset } = useAssets({
+    folderId: folderIdFromUrl || null,
+  });
   const { folders } = useFolders();
   const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
+
+  // Keep filters.folderId in sync with URL query param
+  useEffect(() => {
+    if (folderIdFromUrl !== (filters.folderId || null)) {
+      setFilters((prev) => ({ ...prev, folderId: folderIdFromUrl || null }));
+    }
+  }, [folderIdFromUrl, filters.folderId, setFilters]);
 
   const handleTypeChange = (type: AssetType | 'all') => {
     setFilters((prev) => ({ ...prev, type }));
@@ -29,7 +42,17 @@ export default function LibraryPage() {
 
   const handleFolderChange = (folderId: string | null) => {
     setFilters((prev) => ({ ...prev, folderId }));
+    const params = new URLSearchParams(searchParams.toString());
+    if (folderId) {
+      params.set('folder_id', folderId);
+    } else {
+      params.delete('folder_id');
+    }
+    const query = params.toString();
+    router.replace(query ? `/library?${query}` : '/library');
   };
+
+  const activeFolder = folders.find((f) => f.id === filters.folderId);
 
   return (
     <div className="space-y-6">
@@ -50,6 +73,7 @@ export default function LibraryPage() {
               className={`p-1.5 rounded-md text-xs font-medium transition ${
                 viewMode === 'grid' ? 'bg-slate-800 text-violet-400' : 'text-slate-400 hover:text-slate-200'
               }`}
+              title="Grid View"
             >
               <LayoutGrid className="h-4 w-4" />
             </button>
@@ -58,6 +82,7 @@ export default function LibraryPage() {
               className={`p-1.5 rounded-md text-xs font-medium transition ${
                 viewMode === 'list' ? 'bg-slate-800 text-violet-400' : 'text-slate-400 hover:text-slate-200'
               }`}
+              title="List View"
             >
               <List className="h-4 w-4" />
             </button>
@@ -105,6 +130,29 @@ export default function LibraryPage() {
         </div>
       </div>
 
+      {/* Active Folder Filter Banner */}
+      {filters.folderId && (
+        <div className="flex items-center justify-between px-3.5 py-2.5 rounded-xl bg-violet-950/40 border border-violet-800/40 text-xs">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="p-1 rounded bg-violet-600/20 text-violet-300 flex-shrink-0">
+              <FolderTree className="h-3.5 w-3.5" />
+            </span>
+            <span className="text-slate-400 truncate">
+              Viewing folder:{' '}
+              <strong className="text-violet-200 font-semibold">{activeFolder?.name || filters.folderId}</strong>
+            </span>
+            <span className="text-slate-500 font-mono text-[10px] hidden sm:inline">({filters.folderId})</span>
+          </div>
+          <button
+            onClick={() => handleFolderChange(null)}
+            className="text-violet-400 hover:text-violet-300 hover:underline flex items-center gap-1 font-medium transition flex-shrink-0 ml-2"
+          >
+            <X className="h-3 w-3" />
+            <span>Show All Assets</span>
+          </button>
+        </div>
+      )}
+
       {/* Main Asset Grid / List */}
       {loading ? (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
@@ -131,11 +179,27 @@ export default function LibraryPage() {
         </div>
       ) : (
         <div className="p-16 text-center bg-slate-900/40 border border-slate-800 rounded-2xl">
-          <ImageIcon className="h-12 w-12 text-slate-400 mx-auto mb-3" />
-          <h3 className="text-base font-medium text-slate-200">No media assets in this view</h3>
+          <ImageIcon className="h-12 w-12 text-slate-500 mx-auto mb-3" />
+          <h3 className="text-base font-medium text-slate-200">
+            {filters.folderId
+              ? `No media assets in "${activeFolder?.name || 'this folder'}"`
+              : 'No media assets in this view'}
+          </h3>
           <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
-            Try adjusting your search query, folder filter, or upload a new media file into this workspace.
+            {filters.folderId
+              ? 'This folder is currently empty. You can upload media into this folder or clear the filter to view all assets.'
+              : 'Try adjusting your search query, folder filter, or upload a new media file into this workspace.'}
           </p>
+          {filters.folderId && (
+            <div className="mt-4 flex items-center justify-center gap-3">
+              <button
+                onClick={() => handleFolderChange(null)}
+                className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 font-medium transition"
+              >
+                Show All Assets
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -147,5 +211,24 @@ export default function LibraryPage() {
         onPurge={purgeAsset}
       />
     </div>
+  );
+}
+
+export default function LibraryPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="space-y-6">
+          <div className="h-12 bg-slate-900 rounded-xl animate-pulse" />
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
+            {[1, 2, 3, 4, 5, 6].map((i) => (
+              <div key={i} className="aspect-square bg-slate-900 rounded-xl animate-pulse" />
+            ))}
+          </div>
+        </div>
+      }
+    >
+      <LibraryContent />
+    </Suspense>
   );
 }
