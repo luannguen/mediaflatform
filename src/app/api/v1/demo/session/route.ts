@@ -24,7 +24,8 @@ export async function POST(req: NextRequest) {
       const { data: ws } = await supabaseAdmin
         .from('workspaces')
         .select('id, organization_id')
-        .eq('slug', 'default')
+        .or('id.eq.ws_default,slug.eq.default,slug.eq.production')
+        .limit(1)
         .maybeSingle();
 
       if (ws) {
@@ -38,11 +39,9 @@ export async function POST(req: NextRequest) {
             id: `mem_demo_${role}_${workspaceId}`,
             workspace_id: workspaceId,
             user_id: demoUserId,
-            user_email: demoUser.email,
-            user_name: demoUser.name,
             role_id: `role_${role}`,
-            role: demoUser.role,
             status: 'active',
+            joined_at: new Date().toISOString(),
           },
           { onConflict: 'workspace_id,user_id' }
         );
