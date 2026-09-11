@@ -22,8 +22,13 @@ import {
   RefreshCw,
   AlertCircle,
   Clock,
+  Boxes,
+  FolderTree,
+  Plus,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { useFolders } from '@/hooks/useFolders';
+import { useCollections } from '@/hooks/useCollections';
 
 interface AssetDetailDrawerProps {
   asset: Asset | null;
@@ -70,6 +75,48 @@ export function AssetDetailDrawer({ asset, onClose, onTrash, onPurge }: AssetDet
       .catch((err) => console.error('Failed to load references', err))
       .finally(() => setLoadingRefs(false));
   }, [asset]);
+
+  // Folders & Collections
+  const { folders } = useFolders();
+  const { collections, addAssetToCollection, removeAssetFromCollection } = useCollections();
+  const [assetCollections, setAssetCollections] = useState<{ id: string; name: string }[]>([]);
+  const [selectedColToAdd, setSelectedColToAdd] = useState('');
+  const [addingCol, setAddingCol] = useState(false);
+
+  useEffect(() => {
+    if (!asset) {
+      setAssetCollections([]);
+      return;
+    }
+    fetch(`/api/v1/assets/${asset.id}/collections`)
+      .then((res) => res.json())
+      .then((json) => {
+        if (json.data) setAssetCollections(json.data);
+      })
+      .catch(() => {});
+  }, [asset]);
+
+  const handleAddToCollection = async () => {
+    if (!asset || !selectedColToAdd) return;
+    setAddingCol(true);
+    const success = await addAssetToCollection(selectedColToAdd, asset.id);
+    if (success) {
+      const col = collections.find((c) => c.id === selectedColToAdd);
+      if (col && !assetCollections.some((c) => c.id === col.id)) {
+        setAssetCollections((prev) => [...prev, { id: col.id, name: col.name }]);
+      }
+      setSelectedColToAdd('');
+    }
+    setAddingCol(false);
+  };
+
+  const handleRemoveFromCollection = async (collectionId: string) => {
+    if (!asset) return;
+    const success = await removeAssetFromCollection(collectionId, asset.id);
+    if (success) {
+      setAssetCollections((prev) => prev.filter((c) => c.id !== collectionId));
+    }
+  };
 
   // Video Processing Job State & Polling
   const [job, setJob] = useState<ProcessingJob | null>(null);
@@ -349,10 +396,80 @@ export function AssetDetailDrawer({ asset, onClose, onTrash, onPurge }: AssetDet
                   <span className="text-slate-200 font-mono">{asset.width} × {asset.height} px</span>
                 </div>
               )}
-              <div className="flex justify-between py-1">
+              <div className="flex justify-between py-1 border-b border-slate-800/60">
                 <span className="text-slate-400">Created At</span>
                 <span className="text-slate-200">{new Date(asset.created_at).toLocaleString()}</span>
               </div>
+              <div className="flex justify-between py-1">
+                <span className="text-slate-400">Folder</span>
+                <span className="text-slate-200 font-medium">
+                  {asset.folder_id ? folders.find((f) => f.id === asset.folder_id)?.name || asset.folder_id : 'Root Library (None)'}
+                </span>
+              </div>
+            </div>
+
+            {/* Curated Collections Section */}
+            <div className="bg-slate-950/60 p-3.5 rounded-lg border border-slate-800 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                  <Boxes className="h-4 w-4 text-violet-400" />
+                  <span>Curated Collections</span>
+                </span>
+                <span className="text-[11px] text-slate-400 font-mono">
+                  {assetCollections.length} collections
+                </span>
+              </div>
+
+              {/* Badges of current collections */}
+              <div className="flex flex-wrap gap-1.5 min-h-[28px] items-center">
+                {assetCollections.length > 0 ? (
+                  assetCollections.map((col) => (
+                    <span
+                      key={col.id}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-purple-950/80 text-purple-300 border border-purple-800/50 shadow-sm"
+                    >
+                      <span>{col.name}</span>
+                      <button
+                        onClick={() => handleRemoveFromCollection(col.id)}
+                        className="hover:text-rose-400 text-purple-400/80 transition ml-1"
+                        title="Remove from collection"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </span>
+                  ))
+                ) : (
+                  <span className="text-xs text-slate-500 italic">This asset does not belong to any collection</span>
+                )}
+              </div>
+
+              {/* Add to collection dropdown */}
+              {collections.length > 0 && (
+                <div className="pt-2 border-t border-slate-800/60 flex items-center gap-2">
+                  <select
+                    value={selectedColToAdd}
+                    onChange={(e) => setSelectedColToAdd(e.target.value)}
+                    className="flex-1 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-violet-500"
+                  >
+                    <option value="">Add to collection...</option>
+                    {collections
+                      .filter((c) => !assetCollections.some((ac) => ac.id === c.id))
+                      .map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                  </select>
+                  <button
+                    onClick={handleAddToCollection}
+                    disabled={!selectedColToAdd || addingCol}
+                    className="px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white text-xs font-medium flex items-center gap-1 transition shadow-sm"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    <span>{addingCol ? 'Adding...' : 'Add'}</span>
+                  </button>
+                </div>
+              )}
             </div>
 
             {asset.description && (

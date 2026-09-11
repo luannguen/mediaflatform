@@ -4,6 +4,7 @@ export type IdPrefix =
   | 'med'
   | 'fld'
   | 'col'
+  | 'ca'
   | 'tag'
   | 'app'
   | 'svc'

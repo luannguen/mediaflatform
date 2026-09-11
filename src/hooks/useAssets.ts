@@ -6,6 +6,7 @@ import { toast } from 'sonner';
 
 export interface UseAssetsFilters {
   folderId?: string | null;
+  collectionId?: string | null;
   type?: AssetType | 'all';
   search?: string;
   status?: string;
@@ -26,6 +27,7 @@ export function useAssets(initialFilters: UseAssetsFilters = {}) {
     try {
       const params = new URLSearchParams();
       if (current.folderId) params.set('folder_id', current.folderId);
+      if (current.collectionId) params.set('collection_id', current.collectionId);
       if (current.type && current.type !== 'all') params.set('type', current.type);
       if (current.status) params.set('status', current.status);
       if (current.search) params.set('search', current.search);

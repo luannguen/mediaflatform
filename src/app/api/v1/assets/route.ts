@@ -10,6 +10,7 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
 
     const folderId = searchParams.get('folder_id') || undefined;
+    const collectionId = searchParams.get('collection_id') || undefined;
     const assetType = ((searchParams.get('asset_type') || searchParams.get('type')) as AssetType | 'all') || undefined;
     const status = (searchParams.get('status') as AssetStatus | 'all') || undefined;
     const visibility = (searchParams.get('visibility') as 'public' | 'workspace' | 'private' | 'all') || undefined;
@@ -24,6 +25,7 @@ export async function GET(req: NextRequest) {
     const result = await assetService.listAssets({
       workspaceId: principal.workspaceId,
       folderId,
+      collectionId,
       assetType,
       status,
       visibility,

@@ -23,6 +23,7 @@ export function DevToolsErrorSuppressor() {
       );
     };
 
+    // 1. Intercept standard DOM error events
     const handleError = (event: ErrorEvent) => {
       if (isDevToolsBug(event?.message, event?.error?.stack)) {
         event.preventDefault();
@@ -31,6 +32,7 @@ export function DevToolsErrorSuppressor() {
       }
     };
 
+    // 2. Intercept unhandled promise rejections
     const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
       const reason = event?.reason;
       const msg = typeof reason === 'string' ? reason : reason?.message;
@@ -40,10 +42,36 @@ export function DevToolsErrorSuppressor() {
       }
     };
 
+    // 3. Intercept console.error output if Chromium or frameworks relay the error to console
+    const originalConsoleError = console.error;
+    console.error = (...args: any[]) => {
+      const fullText = args
+        .map((a) => (typeof a === 'string' ? a : a?.message || a?.stack || String(a)))
+        .join(' ');
+      if (isDevToolsBug(fullText)) {
+        return;
+      }
+      originalConsoleError.apply(console, args);
+    };
+
+    // 4. Fallback window.onerror handler
+    const originalOnError = window.onerror;
+    window.onerror = (msg, url, line, col, err) => {
+      if (isDevToolsBug(String(msg), err?.stack)) {
+        return true; // suppresses error in browser
+      }
+      if (typeof originalOnError === 'function') {
+        return originalOnError(msg, url, line, col, err);
+      }
+      return false;
+    };
+
     window.addEventListener('error', handleError, true);
     window.addEventListener('unhandledrejection', handleUnhandledRejection);
 
     return () => {
+      console.error = originalConsoleError;
+      window.onerror = originalOnError;
       window.removeEventListener('error', handleError, true);
       window.removeEventListener('unhandledrejection', handleUnhandledRejection);
     };

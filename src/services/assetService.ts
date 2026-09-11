@@ -14,6 +14,7 @@ import { AuthPrincipal } from '@/lib/security/auth-guard';
 export interface ListAssetsParams {
   workspaceId?: string;
   folderId?: string | null;
+  collectionId?: string;
   assetType?: AssetType | 'all';
   status?: AssetStatus | 'all';
   visibility?: 'public' | 'workspace' | 'private' | 'all';
@@ -153,6 +154,30 @@ export const assetService = {
       };
     }
 
+    // Collection filter in persistent mode
+    let collectionAssetIds: string[] | null = null;
+    if (params.collectionId) {
+      const { data: caRows, error: caErr } = await supabaseAdmin
+        .from('collection_assets')
+        .select('asset_id')
+        .eq('collection_id', params.collectionId);
+
+      if (caErr) {
+        throw AppError.internal(`Failed to load collection assets: ${caErr.message}`);
+      }
+      collectionAssetIds = (caRows || []).map((r: any) => r.asset_id);
+      if (collectionAssetIds.length === 0) {
+        return {
+          assets: [],
+          total: 0,
+          page,
+          limit,
+          hasMore: false,
+          nextCursor: null,
+        };
+      }
+    }
+
     // Supabase Real Queries
     let query = supabaseAdmin
       .from('assets')
@@ -163,6 +188,10 @@ export const assetService = {
       query = query.eq('status', params.status);
     } else {
       query = query.neq('status', 'trashed').neq('status', 'deleted');
+    }
+
+    if (collectionAssetIds !== null) {
+      query = query.in('id', collectionAssetIds);
     }
 
     if (params.folderId !== undefined) {

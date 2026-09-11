@@ -48,51 +48,63 @@ export default function DashboardOverviewPage() {
 
       {/* Metrics Row */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between">
+        <Link
+          href="/library"
+          className="group p-5 rounded-xl bg-slate-900 border border-slate-800 hover:border-violet-500/50 hover:bg-slate-900/80 transition-all flex items-center justify-between cursor-pointer"
+        >
           <div>
-            <span className="text-xs font-medium text-slate-400">Total Media Assets</span>
+            <span className="text-xs font-medium text-slate-400 group-hover:text-slate-300">Total Media Assets</span>
             <h3 className="text-2xl font-bold text-slate-100 mt-1">{total}</h3>
             <span className="text-xs text-emerald-400 flex items-center gap-1 mt-1">
               <TrendingUp className="h-3 w-3" /> Active & Verified
             </span>
           </div>
-          <div className="p-3 rounded-xl bg-violet-600/10 text-violet-400">
+          <div className="p-3 rounded-xl bg-violet-600/10 text-violet-400 group-hover:bg-violet-600/20 group-hover:text-violet-300 transition-colors">
             <ImageIcon className="h-6 w-6" />
           </div>
-        </div>
+        </Link>
 
-        <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between">
+        <Link
+          href="/analytics"
+          className="group p-5 rounded-xl bg-slate-900 border border-slate-800 hover:border-emerald-500/50 hover:bg-slate-900/80 transition-all flex items-center justify-between cursor-pointer"
+        >
           <div>
-            <span className="text-xs font-medium text-slate-400">Storage Used</span>
+            <span className="text-xs font-medium text-slate-400 group-hover:text-slate-300">Storage Used</span>
             <h3 className="text-2xl font-bold text-slate-100 mt-1">{formatSize(totalBytes)}</h3>
             <span className="text-xs text-slate-400 mt-1 block">Quota: 10 GB (Supabase)</span>
           </div>
-          <div className="p-3 rounded-xl bg-emerald-600/10 text-emerald-400">
+          <div className="p-3 rounded-xl bg-emerald-600/10 text-emerald-400 group-hover:bg-emerald-600/20 group-hover:text-emerald-300 transition-colors">
             <HardDrive className="h-6 w-6" />
           </div>
-        </div>
+        </Link>
 
-        <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between">
+        <Link
+          href="/developers"
+          className="group p-5 rounded-xl bg-slate-900 border border-slate-800 hover:border-purple-500/50 hover:bg-slate-900/80 transition-all flex items-center justify-between cursor-pointer"
+        >
           <div>
-            <span className="text-xs font-medium text-slate-400">Active API Keys</span>
+            <span className="text-xs font-medium text-slate-400 group-hover:text-slate-300">Active API Keys</span>
             <h3 className="text-2xl font-bold text-slate-100 mt-1">{apiKeys.filter((k) => k.status === 'active').length}</h3>
             <span className="text-xs text-violet-400 mt-1 block">SHA-256 Encrypted</span>
           </div>
-          <div className="p-3 rounded-xl bg-purple-600/10 text-purple-400">
+          <div className="p-3 rounded-xl bg-purple-600/10 text-purple-400 group-hover:bg-purple-600/20 group-hover:text-purple-300 transition-colors">
             <KeyRound className="h-6 w-6" />
           </div>
-        </div>
+        </Link>
 
-        <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between">
+        <Link
+          href="/developers"
+          className="group p-5 rounded-xl bg-slate-900 border border-slate-800 hover:border-blue-500/50 hover:bg-slate-900/80 transition-all flex items-center justify-between cursor-pointer"
+        >
           <div>
-            <span className="text-xs font-medium text-slate-400">Connected Apps</span>
+            <span className="text-xs font-medium text-slate-400 group-hover:text-slate-300">Connected Apps</span>
             <h3 className="text-2xl font-bold text-slate-100 mt-1">{applications.length}</h3>
             <span className="text-xs text-emerald-400 mt-1 block">Safe Delete Protected</span>
           </div>
-          <div className="p-3 rounded-xl bg-blue-600/10 text-blue-400">
+          <div className="p-3 rounded-xl bg-blue-600/10 text-blue-400 group-hover:bg-blue-600/20 group-hover:text-blue-300 transition-colors">
             <ShieldCheck className="h-6 w-6" />
           </div>
-        </div>
+        </Link>
       </div>
 
       {/* Recent Assets Section */}

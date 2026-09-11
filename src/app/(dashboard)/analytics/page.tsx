@@ -74,11 +74,7 @@ export default function AnalyticsDashboardPage() {
     else setLoading(true);
 
     try {
-      const res = await fetch(`/api/v1/analytics?period=${period}`, {
-        headers: {
-          'X-Media-Api-Key': 'mda_live_demo2026_antigravity_platform_super_secret_key_v1',
-        },
-      });
+      const res = await fetch(`/api/v1/analytics?period=${period}`);
       const json = await res.json();
       if (json.data) {
         setData(json.data);
