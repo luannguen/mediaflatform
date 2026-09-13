@@ -38,12 +38,12 @@ export async function GET() {
         input_formats: ['application/pdf'],
         features: ['binary_validation', 'page_count_extraction', 'first_page_thumbnail_webp'],
       },
-      audio: {
-        enabled: false,
-      },
+      audio: { enabled: false },
     },
     features: {
       direct_upload: true,
+      direct_upload_protocols: ['signed-put'],
+      resumable_upload: false,
       presigned_upload: true,
       private_delivery: true,
       magic_byte_validation: true,
@@ -58,22 +58,17 @@ export async function GET() {
       idempotency: true,
     },
     limits: {
-      max_upload_size_bytes: 524288000, // 500 MB
+      max_upload_size_bytes: 524288000,
       rate_limit_window_seconds: 60,
       presigned_url_expiration_seconds: 3600,
     },
   };
 
   return NextResponse.json(
-    {
-      success: true,
-      data: capabilities,
-    },
+    { success: true, data: capabilities },
     {
       status: 200,
-      headers: {
-        'Cache-Control': 'public, max-age=300',
-      },
+      headers: { 'Cache-Control': 'public, max-age=300' },
     }
   );
 }
