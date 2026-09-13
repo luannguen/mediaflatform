@@ -132,13 +132,14 @@ async function main() {
 
   let testSessionId = '';
   let testStorageKey = '';
+  const mockVideoPayload = Buffer.from('FAKE_MP4_DIRECT_UPLOAD_DATA_' + timestamp);
 
   await runTest('3.1 Create direct upload session produces valid capability schema', async () => {
     const res = await uploadSessionService.createSession({
       workspaceId: testWorkspaceId,
       filename: `video_test_${timestamp}.mp4`,
       mimeType: 'video/mp4',
-      fileSizeBytes: 10485760, // 10MB
+      fileSizeBytes: mockVideoPayload.length,
       visibility: 'private',
       userId: testUserId,
     });
@@ -149,7 +150,7 @@ async function main() {
     assert.strictEqual(res.session.workspace_id, testWorkspaceId);
     assert.strictEqual(res.session.status, 'created');
     assert.strictEqual(res.session.mime_type, 'video/mp4');
-    assert.strictEqual(res.session.size_bytes, 10485760);
+    assert.strictEqual(res.session.size_bytes, mockVideoPayload.length);
     assert.strictEqual(res.session.visibility, 'private');
 
     // Capability invariants
@@ -199,8 +200,6 @@ async function main() {
     }
     assert.strictEqual(failed, true, 'Finalizing non-uploaded session must fail');
   });
-
-  const mockVideoPayload = Buffer.from('FAKE_MP4_DIRECT_UPLOAD_DATA_' + timestamp);
 
   await runTest('4.2 Upload object directly to session storage key', async () => {
     const uploadRes = await storage.upload(mockVideoPayload, testStorageKey, 'video/mp4');
