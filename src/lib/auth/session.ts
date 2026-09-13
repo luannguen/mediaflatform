@@ -42,7 +42,10 @@ export const DEMO_USERS: Record<string, { email: string; name: string; role: Use
 };
 
 function getSessionSecret(): string {
-  const secret = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SESSION_SECRET;
+  const secret =
+    process.env.SESSION_SECRET ||
+    process.env.SUPABASE_SECRET_KEY ||
+    process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (secret) return secret;
   if (process.env.NODE_ENV === 'production') {
     throw new Error('Session signing secret is required in production');
@@ -82,6 +85,12 @@ function base64UrlToBytes(b64url: string): Uint8Array {
   return out;
 }
 
+function bytesToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
+}
+
 async function importHmacKey(secret: string, usages: KeyUsage[]) {
   return crypto.subtle.importKey(
     'raw',
@@ -101,12 +110,9 @@ async function signHmac(secret: string, data: string): Promise<string> {
 async function verifyHmac(secret: string, data: string, signature: string): Promise<boolean> {
   try {
     const key = await importHmacKey(secret, ['verify']);
-    return crypto.subtle.verify(
-      'HMAC',
-      key,
-      base64UrlToBytes(signature),
-      new TextEncoder().encode(data)
-    );
+    const signatureBuffer = bytesToArrayBuffer(base64UrlToBytes(signature));
+    const dataBuffer = bytesToArrayBuffer(new TextEncoder().encode(data));
+    return crypto.subtle.verify('HMAC', key, signatureBuffer, dataBuffer);
   } catch {
     return false;
   }
