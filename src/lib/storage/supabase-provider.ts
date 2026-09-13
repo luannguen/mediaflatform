@@ -1,6 +1,5 @@
 import { StorageProvider, StorageUploadResult, DirectUploadCapability, ObjectMetadata } from './provider';
 import { supabaseAdmin, isSupabaseAdminConfigured } from '../supabase/admin';
-import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
@@ -15,15 +14,10 @@ export class SupabaseStorageProvider implements StorageProvider {
   private saveToLocalCache(key: string, data: Buffer | Uint8Array | Blob, bucket: string) {
     try {
       const localDir = path.join(process.cwd(), 'scratch', 'storage', bucket, path.dirname(key));
-      if (!fs.existsSync(localDir)) {
-        fs.mkdirSync(localDir, { recursive: true });
-      }
+      if (!fs.existsSync(localDir)) fs.mkdirSync(localDir, { recursive: true });
       const localFile = path.join(process.cwd(), 'scratch', 'storage', bucket, key);
-      if (data instanceof Buffer) {
-        fs.writeFileSync(localFile, data);
-      } else if (data instanceof Uint8Array) {
-        fs.writeFileSync(localFile, Buffer.from(data));
-      }
+      if (data instanceof Buffer) fs.writeFileSync(localFile, data);
+      else if (data instanceof Uint8Array) fs.writeFileSync(localFile, Buffer.from(data));
     } catch {
       // Non-blocking local cache write
     }
@@ -39,35 +33,21 @@ export class SupabaseStorageProvider implements StorageProvider {
     this.saveToLocalCache(key, data, bucket);
 
     if (!isSupabaseAdminConfigured()) {
-      // Mock / Dev fallback: generate data URI so images can render and transform locally
       let mockUrl = `https://mock-storage.media-platform.local/${bucket}/${key}`;
-      if (data instanceof Buffer) {
-        mockUrl = `data:${mimeType};base64,${data.toString('base64')}`;
-      } else if (data instanceof Uint8Array) {
-        mockUrl = `data:${mimeType};base64,${Buffer.from(data).toString('base64')}`;
-      }
-      return {
-        storageKey: key,
-        storageUrl: mockUrl,
-        sizeBytes,
-        mimeType,
-      };
+      if (data instanceof Buffer) mockUrl = `data:${mimeType};base64,${data.toString('base64')}`;
+      else if (data instanceof Uint8Array) mockUrl = `data:${mimeType};base64,${Buffer.from(data).toString('base64')}`;
+      return { storageKey: key, storageUrl: mockUrl, sizeBytes, mimeType };
     }
 
     const { error } = await supabaseAdmin.storage.from(bucket).upload(key, data, {
       contentType: mimeType,
       upsert: true,
     });
-
-    if (error) {
-      throw new Error(`Failed to upload to Supabase Storage: ${error.message}`);
-    }
-
-    const storageUrl = this.getPublicUrl(key, bucket);
+    if (error) throw new Error(`Failed to upload to Supabase Storage: ${error.message}`);
 
     return {
       storageKey: key,
-      storageUrl,
+      storageUrl: this.getPublicUrl(key, bucket),
       sizeBytes,
       mimeType,
     };
@@ -75,7 +55,6 @@ export class SupabaseStorageProvider implements StorageProvider {
 
   async delete(key: string, bucket: string = this.defaultBucket): Promise<boolean> {
     if (!isSupabaseAdminConfigured()) return true;
-
     const { error } = await supabaseAdmin.storage.from(bucket).remove([key]);
     if (error) {
       console.warn(`[Storage] Failed to delete object ${key}:`, error.message);
@@ -92,11 +71,8 @@ export class SupabaseStorageProvider implements StorageProvider {
     if (!isSupabaseAdminConfigured()) {
       return `https://mock-storage.media-platform.local/${bucket}/${key}?signed=true&expires=${expiresInSeconds}`;
     }
-
     const { data, error } = await supabaseAdmin.storage.from(bucket).createSignedUrl(key, expiresInSeconds);
-    if (error || !data) {
-      throw new Error(`Failed to get signed URL: ${error?.message}`);
-    }
+    if (error || !data) throw new Error(`Failed to get signed URL: ${error?.message}`);
     return data.signedUrl;
   }
 
@@ -104,16 +80,12 @@ export class SupabaseStorageProvider implements StorageProvider {
     if (!isSupabaseAdminConfigured()) {
       return `https://mock-storage.media-platform.local/${bucket}/${key}`;
     }
-    const { data } = supabaseAdmin.storage.from(bucket).getPublicUrl(key);
-    return data.publicUrl;
+    return supabaseAdmin.storage.from(bucket).getPublicUrl(key).data.publicUrl;
   }
 
   async exists(key: string, bucket: string = this.defaultBucket): Promise<boolean> {
     if (!isSupabaseAdminConfigured()) return true;
-
-    const { data, error } = await supabaseAdmin.storage.from(bucket).list('', {
-      search: key,
-    });
+    const { data, error } = await supabaseAdmin.storage.from(bucket).list('', { search: key });
     if (error || !data) return false;
     return data.some((item) => item.name === key);
   }
@@ -122,23 +94,16 @@ export class SupabaseStorageProvider implements StorageProvider {
     if (isSupabaseAdminConfigured()) {
       try {
         const { data, error } = await supabaseAdmin.storage.from(bucket).download(key);
-        if (!error && data) {
-          const arrayBuffer = await data.arrayBuffer();
-          return Buffer.from(arrayBuffer);
-        }
+        if (!error && data) return Buffer.from(await data.arrayBuffer());
       } catch (err: any) {
         console.warn(`[Storage] Supabase download error for ${key}:`, err.message);
       }
     }
 
-    // Fallback to local cache if Supabase is offline or not configured
     try {
       const localFile = path.join(process.cwd(), 'scratch', 'storage', bucket, key);
-      if (fs.existsSync(localFile)) {
-        return fs.readFileSync(localFile);
-      }
+      if (fs.existsSync(localFile)) return fs.readFileSync(localFile);
     } catch {}
-
     return null;
   }
 
@@ -158,18 +123,14 @@ export class SupabaseStorageProvider implements StorageProvider {
     }
 
     const { data, error } = await supabaseAdmin.storage.from(bucket).createSignedUploadUrl(key);
-    if (error || !data) {
-      throw new Error(`Failed to create presigned upload URL: ${error?.message}`);
-    }
+    if (error || !data) throw new Error(`Failed to create presigned upload URL: ${error?.message}`);
 
     return {
       uploadUrl: data.signedUrl,
       storageKey: key,
       token: data.token,
       method: 'PUT' as const,
-      headers: {
-        'Content-Type': mimeType,
-      },
+      headers: { 'Content-Type': mimeType },
       expiresInSeconds,
     };
   }
@@ -180,10 +141,7 @@ export class SupabaseStorageProvider implements StorageProvider {
         const localFile = path.join(process.cwd(), 'scratch', 'storage', bucket, key);
         if (fs.existsSync(localFile)) {
           const stats = fs.statSync(localFile);
-          return {
-            sizeBytes: stats.size,
-            lastModified: stats.mtime,
-          };
+          return { sizeBytes: stats.size, lastModified: stats.mtime };
         }
       } catch {}
       return null;
@@ -191,9 +149,7 @@ export class SupabaseStorageProvider implements StorageProvider {
 
     try {
       const { data, error } = await supabaseAdmin.storage.from(bucket).info(key);
-      if (error || !data) {
-        return null;
-      }
+      if (error || !data) return null;
       return {
         sizeBytes: Number(data.size || 0),
         contentType: data.contentType,
@@ -216,15 +172,12 @@ export class SupabaseStorageProvider implements StorageProvider {
     const bucket = params.bucket || this.defaultBucket;
     const expiresInSeconds = params.expiresInSeconds || 900;
     const expiresAt = new Date(Date.now() + expiresInSeconds * 1000).toISOString();
-    const thresholdBytes = parseInt(process.env.MEDIA_RESUMABLE_UPLOAD_THRESHOLD_BYTES || '52428800', 10); // 50MB default
 
-    const shouldUseTus =
-      params.preferProtocol === 'tus' ||
-      (Boolean(params.sizeBytes && params.sizeBytes > thresholdBytes) && params.preferProtocol !== 'signed-put');
-
+    // Correctness gate: TUS is not advertised until first-party clients implement the
+    // full create-resource/PATCH/Upload-Offset protocol. Always issue signed-put today.
     if (!isSupabaseAdminConfigured()) {
       return {
-        protocol: shouldUseTus ? 'tus' : 'signed-put',
+        protocol: 'signed-put',
         uploadUrl: `http://localhost:3000/api/v1/uploads/direct-mock?key=${encodeURIComponent(params.key)}`,
         method: 'PUT',
         headers: { 'Content-Type': params.mimeType },
@@ -236,38 +189,15 @@ export class SupabaseStorageProvider implements StorageProvider {
       };
     }
 
-    if (shouldUseTus) {
-      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.replace(/\/$/, '') || '';
-      return {
-        protocol: 'tus',
-        uploadUrl: `${supabaseUrl}/storage/v1/upload/resumable`,
-        method: 'POST',
-        headers: {
-          'Upload-Length': String(params.sizeBytes || 0),
-          'Upload-Metadata': `bucketName ${Buffer.from(bucket).toString('base64')},objectName ${Buffer.from(params.key).toString('base64')},contentType ${Buffer.from(params.mimeType).toString('base64')}`,
-        },
-        token: process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-        storageKey: params.key,
-        storageProvider: this.name,
-        storageBucket: bucket,
-        expiresInSeconds,
-        expiresAt,
-      };
-    }
-
     const { data, error } = await supabaseAdmin.storage.from(bucket).createSignedUploadUrl(params.key);
-    if (error || !data) {
-      throw new Error(`Failed to create signed upload URL: ${error?.message}`);
-    }
+    if (error || !data) throw new Error(`Failed to create signed upload URL: ${error?.message}`);
 
     return {
       protocol: 'signed-put',
       uploadUrl: data.signedUrl,
       token: data.token,
       method: 'PUT',
-      headers: {
-        'Content-Type': params.mimeType,
-      },
+      headers: { 'Content-Type': params.mimeType },
       storageKey: params.key,
       storageProvider: this.name,
       storageBucket: bucket,
