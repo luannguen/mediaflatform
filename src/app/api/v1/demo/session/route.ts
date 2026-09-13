@@ -38,14 +38,13 @@ export async function POST(_req: NextRequest) {
       workspaceId = ws.id;
       organizationId = ws.organization_id;
 
+      // Use only the persisted membership columns known to exist in production.
       const { error: membershipError } = await supabaseAdmin.from('workspace_memberships').upsert(
         {
           id: `mem_demo_public_${workspaceId}`,
           workspace_id: workspaceId,
           user_id: DEMO_USER_ID,
-          user_email: DEMO_EMAIL,
           role_id: DEMO_ROLE_ID,
-          role: DEMO_ROLE,
           status: 'active',
           joined_at: new Date().toISOString(),
         },
