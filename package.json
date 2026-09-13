@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "next lint",
     "test:openapi": "npx tsx scripts/test-openapi-contract.js",
-    "test:correctness": "node scripts/test-v3-8-4-1-correctness-gate.js"
+    "test:correctness": "node scripts/test-v3-8-4-1-correctness-gate.js",
+    "migrate:v3.8.4.1": "node scripts/migrate-v3-8-4-1-correctness-gate.js"
   },
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
