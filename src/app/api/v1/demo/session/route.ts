@@ -8,7 +8,10 @@ const DEMO_ROLE = 'uploader' as const;
 const DEMO_ROLE_ID = 'role_uploader';
 const DEMO_EMAIL = 'demo@media-platform.local';
 const DEMO_NAME = 'Media Platform Public Demo';
-const DEMO_COOKIE_TTL_SECONDS = Number(process.env.DEMO_SESSION_TTL_SECONDS || 3600);
+const DEMO_COOKIE_TTL_SECONDS = Math.max(
+  300,
+  Math.min(Number(process.env.DEMO_SESSION_TTL_SECONDS || 3600), 7200)
+);
 
 /**
  * Public demo broker.
@@ -28,17 +31,12 @@ export async function POST(_req: NextRequest) {
         .limit(1)
         .maybeSingle();
 
-      if (wsError) {
-        throw new Error(`Failed to resolve demo workspace: ${wsError.message}`);
-      }
-      if (!ws) {
-        throw new Error('Demo workspace is not configured');
-      }
+      if (wsError) throw new Error(`Failed to resolve demo workspace: ${wsError.message}`);
+      if (!ws) throw new Error('Demo workspace is not configured');
 
       workspaceId = ws.id;
       organizationId = ws.organization_id;
 
-      // Use only the persisted membership columns known to exist in production.
       const { error: membershipError } = await supabaseAdmin.from('workspace_memberships').upsert(
         {
           id: `mem_demo_public_${workspaceId}`,
@@ -56,24 +54,23 @@ export async function POST(_req: NextRequest) {
       }
     }
 
-    const token = await createSessionToken({
-      userId: DEMO_USER_ID,
-      email: DEMO_EMAIL,
-      name: DEMO_NAME,
-      role: DEMO_ROLE,
-      workspaceId,
-      organizationId,
-    });
+    const token = await createSessionToken(
+      {
+        userId: DEMO_USER_ID,
+        email: DEMO_EMAIL,
+        name: DEMO_NAME,
+        role: DEMO_ROLE,
+        workspaceId,
+        organizationId,
+      },
+      DEMO_COOKIE_TTL_SECONDS
+    );
 
     const res = NextResponse.json({
       success: true,
       workspace_id: workspaceId,
       organization_id: organizationId,
-      user: {
-        name: DEMO_NAME,
-        email: DEMO_EMAIL,
-        role: DEMO_ROLE,
-      },
+      user: { name: DEMO_NAME, email: DEMO_EMAIL, role: DEMO_ROLE },
     });
 
     res.cookies.set({
@@ -83,7 +80,7 @@ export async function POST(_req: NextRequest) {
       sameSite: 'lax',
       secure: process.env.NODE_ENV === 'production',
       path: '/',
-      maxAge: Math.max(300, Math.min(DEMO_COOKIE_TTL_SECONDS, 7200)),
+      maxAge: DEMO_COOKIE_TTL_SECONDS,
     });
 
     return res;
