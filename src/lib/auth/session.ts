@@ -14,33 +14,6 @@ export interface UserSession {
 export const SESSION_COOKIE_NAME = 'mda_session';
 const SESSION_MAX_AGE_SEC = 60 * 60 * 24 * 7;
 
-export const DEMO_USERS: Record<string, { email: string; name: string; role: UserRole; description: string }> = {
-  admin: {
-    email: 'admin@zeroresidues.com',
-    name: 'Alex Rivera (Lead Architect)',
-    role: 'admin',
-    description: 'Toàn quyền quản trị, xóa vĩnh viễn, cấp API Key, quản lý Workspace',
-  },
-  editor: {
-    email: 'editor@zeroresidues.com',
-    name: 'Sarah Connor (Content Lead)',
-    role: 'editor',
-    description: 'Tải lên, biên tập metadata, phân loại thư mục, chuyển vào thùng rác',
-  },
-  viewer: {
-    email: 'viewer@zeroresidues.com',
-    name: 'David Lee (Auditor / Guest)',
-    role: 'viewer',
-    description: 'Chỉ xem và tra cứu tài nguyên, bị khóa tính năng Upload, Delete, API Keys',
-  },
-  developer: {
-    email: 'dev@zeroresidues.com',
-    name: 'Evelyn Wang (Integration Dev)',
-    role: 'developer',
-    description: 'Quản lý Applications, Service Accounts, API Keys và Webhooks',
-  },
-};
-
 function getSessionSecret(): string {
   const secret =
     process.env.SESSION_SECRET ||

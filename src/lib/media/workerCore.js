@@ -11,16 +11,13 @@ const { execFile, spawn } = require('child_process');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
 
-let sharp = null;
-try { sharp = require('sharp'); } catch {}
 
 function resolveBinary(name) {
   if (name === 'ffmpeg' && process.env.FFMPEG_PATH) return process.env.FFMPEG_PATH;
   if (name === 'ffprobe' && process.env.FFPROBE_PATH) return process.env.FFPROBE_PATH;
 
   try {
-    const pkg = name === 'ffmpeg' ? '@ffmpeg-installer/ffmpeg' : '@ffprobe-installer/ffprobe';
-    const installer = require(pkg);
+    const installer = name === 'ffmpeg' ? require('@ffmpeg-installer/ffmpeg') : require('@ffprobe-installer/ffprobe');
     if (installer && installer.path) return installer.path;
   } catch {}
 
@@ -373,13 +370,6 @@ async function extractPosterFrame(sourcePath, targetPath, timeSecOrSignal = 1.0,
     if (signal && (signal.aborted || ffmpegErr.message?.includes('LEASE_LOST'))) {
       throw ffmpegErr;
     }
-    if (sharp) {
-      const fallbackBuf = await sharp({
-        create: { width: 1280, height: 720, channels: 3, background: { r: 24, g: 24, b: 27 } },
-      }).webp().toBuffer();
-      fs.writeFileSync(targetPath, fallbackBuf);
-      return fallbackBuf;
-    }
     throw ffmpegErr;
   }
 
@@ -416,13 +406,6 @@ async function generateAnimatedTrailer(sourcePath, targetPath, durationSecOrSign
     if (signal && (signal.aborted || ffmpegErr.message?.includes('LEASE_LOST'))) {
       throw ffmpegErr;
     }
-    if (sharp) {
-      const fallbackBuf = await sharp({
-        create: { width: 480, height: 270, channels: 3, background: { r: 39, g: 39, b: 42 } },
-      }).webp().toBuffer();
-      fs.writeFileSync(targetPath, fallbackBuf);
-      return fallbackBuf;
-    }
     throw ffmpegErr;
   }
 
@@ -430,54 +413,12 @@ async function generateAnimatedTrailer(sourcePath, targetPath, durationSecOrSign
 }
 
 async function stageSourceVideo(asset, targetPath, storageDownloader) {
-  const parentDir = path.dirname(targetPath);
-  if (!fs.existsSync(parentDir)) {
-    fs.mkdirSync(parentDir, { recursive: true });
-  }
-
-  if (asset.storage_key && fs.existsSync(asset.storage_key)) {
-    fs.copyFileSync(asset.storage_key, targetPath);
-    return targetPath;
-  }
-
-  if (storageDownloader && asset.storage_key) {
-    try {
-      const buf = await storageDownloader(asset.storage_key);
-      if (buf && buf.length > 0) {
-        fs.writeFileSync(targetPath, buf);
-        return targetPath;
-      }
-    } catch (err) {
-      console.warn('[WorkerCore] Storage download failed: ' + err.message);
-    }
-  }
-
-  const localScratch = path.join(process.cwd(), 'scratch', 'storage', 'media-assets', asset.storage_key || '');
-  if (fs.existsSync(localScratch)) {
-    fs.copyFileSync(localScratch, targetPath);
-    return targetPath;
-  }
-
-  if (asset.storage_url && asset.storage_url.startsWith('data:')) {
-    const parts = asset.storage_url.split(',');
-    if (parts[1]) {
-      fs.writeFileSync(targetPath, Buffer.from(parts[1], 'base64'));
-      return targetPath;
-    }
-  }
-
-  if (asset.storage_url && (asset.storage_url.startsWith('http://') || asset.storage_url.startsWith('https://'))) {
-    try {
-      const res = await fetch(asset.storage_url);
-      if (res.ok) {
-        const buffer = Buffer.from(await res.arrayBuffer());
-        fs.writeFileSync(targetPath, buffer);
-        return targetPath;
-      }
-    } catch {}
-  }
-
-  throw new Error('SOURCE_NOT_FOUND: Could not acquire source video data for asset ' + asset.id);
+  if (!asset.storage_key || !storageDownloader) throw new Error('SOURCE_NOT_FOUND: A trusted storage downloader is required');
+  const buffer = await storageDownloader(asset.storage_key);
+  if (!buffer?.length) throw new Error('SOURCE_NOT_FOUND: Storage object is empty');
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+  fs.writeFileSync(targetPath, buffer, { flag: 'wx' });
+  return targetPath;
 }
 
 async function executePipeline(ctx) {
@@ -538,7 +479,7 @@ async function executePipeline(ctx) {
   });
 
   const posterPath = path.join(workDir, 'poster.webp');
-  const posterBuffer = await extractPosterFrame(sourcePath, posterPath, 1.0, abortController.signal);
+  const posterBuffer = await extractPosterFrame(sourcePath, posterPath, Math.min(1, Math.max(0, probeResult.durationSec / 2)), abortController.signal);
 
   await progressUpdater('preview_generation', 80, {
     stage_message: 'Generating 3s animated trailer loop from source video...',

@@ -1,3 +1,4 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest } from 'next/server';
 import { POST as handleAssetDeliveryGrant } from '@/app/api/v1/assets/[id]/delivery-grant/route';
 import { AppError } from '@/lib/errors/app-error';
@@ -10,7 +11,7 @@ export const dynamic = 'force-dynamic';
  * POST /api/v1/delivery/grants
  * Batch or general entry point for minting delivery grants with { asset_id: string }
  */
-export async function POST(req: NextRequest) {
+async function handlePOST(req: NextRequest) {
   const requestId = extractRequestId(req);
   try {
     const clone = req.clone();
@@ -32,3 +33,5 @@ export async function POST(req: NextRequest) {
     return errorResponse(err, requestId);
   }
 }
+
+export const POST = withApiRoute(handlePOST);

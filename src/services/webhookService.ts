@@ -1,237 +1,62 @@
 import { WebhookEndpoint, WebhookDelivery } from '@/types/database';
-import { generateId } from '@/lib/ids/generator';
-import { isSupabaseAdminConfigured, supabaseAdmin } from '@/lib/supabase/admin';
-import { mockWorkspace, mockDb } from '@/lib/mock/store';
+import { supabaseAdmin } from '@/lib/supabase/admin';
 import { AppError } from '@/lib/errors/app-error';
-import crypto from 'crypto';
-
-export interface CreateWebhookInput {
-  workspaceId?: string;
-  applicationId?: string;
-  name: string;
-  url: string;
-  events: string[];
-}
-
-export const webhookService = {
-  async listEndpoints(workspaceId: string = mockWorkspace.id): Promise<WebhookEndpoint[]> {
-    if (!isSupabaseAdminConfigured()) {
-      return mockDb.webhookEndpoints.filter((w) => w.workspace_id === workspaceId);
-    }
-    const { data, error } = await supabaseAdmin.from('webhook_endpoints').select('*').eq('workspace_id', workspaceId);
-    if (error) throw AppError.internal(`Failed to list webhooks: ${error.message}`);
-    return (data as WebhookEndpoint[]) || [];
-  },
-
-  async createEndpoint(input: CreateWebhookInput): Promise<{ endpoint: WebhookEndpoint; secret: string }> {
-    const id = generateId('wh');
-    const workspaceId = input.workspaceId || mockWorkspace.id;
-    const now = new Date().toISOString();
-    const rawSecret = `whsec_${crypto.randomBytes(24).toString('hex')}`;
-
-    const endpoint: WebhookEndpoint = {
-      id,
-      workspace_id: workspaceId,
-      application_id: input.applicationId || null,
-      name: input.name,
-      url: input.url,
-      events: input.events,
-      secret_hash: rawSecret, // Stores the signing secret for outbound HMAC signatures
-      status: 'active',
-      created_at: now,
-      updated_at: now,
-    };
-
-    if (!isSupabaseAdminConfigured()) {
-      mockDb.webhookEndpoints.push(endpoint);
-      return { endpoint, secret: rawSecret };
-    }
-
-    const { data, error } = await supabaseAdmin.from('webhook_endpoints').insert(endpoint).select().single();
-    if (error) throw AppError.internal(`Failed to create webhook endpoint: ${error.message}`);
-
-    return { endpoint: data as WebhookEndpoint, secret: rawSecret };
-  },
-
-  /**
-   * Dispatch an event to all active matching webhook endpoints with optional deterministic Event ID
-   */
-  async dispatchEvent(
-    workspaceId: string,
-    eventType: string,
-    dataPayload: any,
-    options?: { eventId?: string }
-  ) {
-    const endpoints = await this.listEndpoints(workspaceId);
-    const matching = endpoints.filter(
-      (e) => e.status === 'active' && (e.events.includes('*') || e.events.includes(eventType))
-    );
-
-    // Prefer deterministic event ID for idempotent consumer deduplication
-    const eventId = options?.eventId || dataPayload?.event_id || `evt_${Date.now().toString(36)}_${crypto.randomBytes(4).toString('hex')}`;
-    const payload = {
-      event_id: eventId,
-      event_type: eventType,
-      created_at: new Date().toISOString(),
-      data: { ...dataPayload, event_id: eventId },
-    };
-
-    // Asynchronously dispatch without blocking caller
-    for (const ep of matching) {
-      this.deliver(ep, eventType, eventId, payload).catch((err) =>
-        console.warn(`[Webhook] Delivery failed to ${ep.url}:`, err.message)
-      );
-    }
-  },
-
-  async deliver(ep: WebhookEndpoint, eventType: string, eventId: string, payload: any) {
-    const payloadString = JSON.stringify(payload);
-    const signature = crypto.createHmac('sha256', ep.secret_hash).update(payloadString).digest('hex');
-
-    let httpStatus = 0;
-    let status: 'delivered' | 'failed' = 'failed';
-    let responseSummary = '';
-
-    try {
-      const res = await fetch(ep.url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Media-Event': eventType,
-          'X-Media-Delivery': eventId,
-          'X-Media-Signature': signature,
-        },
-        body: payloadString,
-        signal: AbortSignal.timeout(5000), // 5 seconds timeout
-      });
-
-      httpStatus = res.status;
-      status = res.ok ? 'delivered' : 'failed';
-      responseSummary = `HTTP ${res.status}`;
-    } catch (err: any) {
-      responseSummary = err.message || 'Connection failed';
-    }
-
-    const deliveryRecord: WebhookDelivery = {
-      id: generateId('evt'),
-      webhook_endpoint_id: ep.id,
-      event_type: eventType,
-      event_id: eventId,
-      payload,
-      status,
-      http_status: httpStatus || undefined,
-      attempt_count: 1,
-      last_attempt_at: new Date().toISOString(),
-      response_summary: responseSummary,
-      created_at: new Date().toISOString(),
-    };
-
-    if (isSupabaseAdminConfigured()) {
-      supabaseAdmin.from('webhook_deliveries').insert(deliveryRecord).then();
-    } else {
-      mockDb.webhookDeliveries.push(deliveryRecord);
-    }
-  },
-
-  async listDeliveries(endpointId?: string): Promise<WebhookDelivery[]> {
-    if (!isSupabaseAdminConfigured()) {
-      if (endpointId) {
-        return mockDb.webhookDeliveries.filter((d) => d.webhook_endpoint_id === endpointId);
-      }
-      return mockDb.webhookDeliveries;
-    }
-    let query = supabaseAdmin.from('webhook_deliveries').select('*').order('created_at', { ascending: false }).limit(50);
-    if (endpointId) {
-      query = query.eq('webhook_endpoint_id', endpointId);
-    }
-    const { data } = await query;
-    return (data as WebhookDelivery[]) || [];
-  },
-
-  /**
-   * Safe Webhook Replay:
-   * 1. Validates delivery exists and belongs to endpoint within workspace.
-   * 2. Retains original historical attempt (immutable).
-   * 3. Triggers a new delivery attempt with a fresh delivery ID and timestamp.
-   */
-  async replayDelivery(deliveryId: string, workspaceId: string = mockWorkspace.id): Promise<WebhookDelivery> {
-    let delivery: WebhookDelivery | undefined;
-
-    if (!isSupabaseAdminConfigured()) {
-      delivery = mockDb.webhookDeliveries.find((d) => d.id === deliveryId);
-    } else {
-      const { data, error } = await supabaseAdmin
-        .from('webhook_deliveries')
-        .select('*')
-        .eq('id', deliveryId)
-        .maybeSingle();
-
-      if (error || !data) throw AppError.notFound(`Webhook delivery ${deliveryId} not found`);
-      delivery = data as WebhookDelivery;
-    }
-
-    if (!delivery) {
-      throw AppError.notFound(`Webhook delivery ${deliveryId} not found`);
-    }
-
-    // Verify endpoint belongs to workspace
-    const endpoints = await this.listEndpoints(workspaceId);
-    const endpoint = endpoints.find((e) => e.id === delivery!.webhook_endpoint_id);
-    if (!endpoint) {
-      throw AppError.forbidden(`Webhook endpoint not found or does not belong to workspace ${workspaceId}`);
-    }
-
-    // Dispatch a new delivery attempt retaining original event_id and payload
-    const newDeliveryId = generateId('evt');
-    const payloadString = JSON.stringify(delivery.payload);
-    const signature = crypto.createHmac('sha256', endpoint.secret_hash).update(payloadString).digest('hex');
-
-    let httpStatus = 0;
-    let status: 'delivered' | 'failed' = 'failed';
-    let responseSummary = '';
-
-    try {
-      const res = await fetch(endpoint.url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Media-Event': delivery.event_type,
-          'X-Media-Delivery': newDeliveryId,
-          'X-Media-Signature': signature,
-          'X-Media-Replay': 'true',
-        },
-        body: payloadString,
-        signal: AbortSignal.timeout(5000),
-      });
-
-      httpStatus = res.status;
-      status = res.ok ? 'delivered' : 'failed';
-      responseSummary = `HTTP ${res.status}`;
-    } catch (err: any) {
-      responseSummary = err.message || 'Replay connection failed';
-    }
-
-    const replayRecord: WebhookDelivery = {
-      id: newDeliveryId,
-      webhook_endpoint_id: endpoint.id,
-      event_type: delivery.event_type,
-      event_id: delivery.event_id,
-      payload: delivery.payload,
-      status,
-      http_status: httpStatus || undefined,
-      attempt_count: (delivery.attempt_count || 1) + 1,
-      last_attempt_at: new Date().toISOString(),
-      response_summary: `[REPLAY] ${responseSummary}`,
-      created_at: new Date().toISOString(),
-    };
-
-    if (isSupabaseAdminConfigured()) {
-      await supabaseAdmin.from('webhook_deliveries').insert(replayRecord);
-    } else {
-      mockDb.webhookDeliveries.unshift(replayRecord);
-    }
-
-    return replayRecord;
-  },
+import { generateId } from '@/lib/ids/generator';
+import { validateWebhookUrl, sendWebhook } from '@/lib/security/webhookTransport';
+import crypto from 'node:crypto';
+export interface CreateWebhookInput {workspaceId?:string; applicationId?:string; name:string; url:string; events:string[];}
+const publicEndpoint=(row: WebhookEndpoint): WebhookEndpoint=>{const {secret_hash,...safe}=row;return safe as WebhookEndpoint;};
+export const webhookService={
+ async listEndpoints(workspaceId:string):Promise<WebhookEndpoint[]> {
+  const {data,error}=await supabaseAdmin.from('webhook_endpoints').select('*').eq('workspace_id',workspaceId);
+  if(error)throw AppError.serviceUnavailable('Webhook endpoints unavailable');
+  return (data||[]).map(publicEndpoint);
+ },
+ async createEndpoint(input:CreateWebhookInput) {
+  validateWebhookUrl(input.url);
+  if(!input.workspaceId || !input.name || input.name.length>100 || !Array.isArray(input.events) || !input.events.length || input.events.length>30 || input.events.some(e=>typeof e!=='string' || !/^(\*|(?:asset|image|video|document)\.[a-z_]+)$/.test(e)))throw AppError.badRequest('Invalid webhook configuration');
+  if(input.applicationId){const {data,error}=await supabaseAdmin.from('applications').select('id').eq('id',input.applicationId).eq('workspace_id',input.workspaceId).maybeSingle();if(error||!data)throw AppError.forbidden('Application does not belong to this workspace');}
+  const secret='whsec_'+crypto.randomBytes(32).toString('hex');
+  const {data,error}=await supabaseAdmin.from('webhook_endpoints').insert({id:generateId('wh'),workspace_id:input.workspaceId,application_id:input.applicationId||null,name:input.name,url:input.url,events:input.events,secret_hash:secret,status:'active'}).select('*').single();
+  if(error)throw AppError.serviceUnavailable('Could not create webhook endpoint');
+  return {endpoint:publicEndpoint(data),secret};
+ },
+ async dispatchEvent(workspaceId:string,eventType:string,dataPayload:any,options?:{eventId?:string}) {
+  // Core asset events are captured in the committing database transaction.
+  if(['asset.created','asset.updated','asset.trashed','asset.restored','asset.deleted','image.processed','video.processed','document.processed'].includes(eventType))return;
+  const {error}=await supabaseAdmin.rpc('enqueue_media_event',{p_workspace:workspaceId,p_type:eventType,p_data:dataPayload,p_event_id:options?.eventId||crypto.randomUUID()});
+  if(error)throw AppError.serviceUnavailable('Could not queue webhook event');
+ },
+ async listDeliveries(endpointId:string|undefined,workspaceId:string):Promise<WebhookDelivery[]> {
+  const endpoints=await this.listEndpoints(workspaceId); const ids=endpoints.map(e=>e.id);
+  if(endpointId&&!ids.includes(endpointId))throw AppError.forbidden('Webhook endpoint does not belong to this workspace');
+  if(!ids.length)return [];
+  const {data,error}=await supabaseAdmin.from('webhook_deliveries').select('*').in('webhook_endpoint_id',endpointId?[endpointId]:ids).order('created_at',{ascending:false}).limit(100);
+  if(error)throw AppError.serviceUnavailable('Webhook deliveries unavailable');
+  return data||[];
+ },
+ async replayDelivery(deliveryId:string,workspaceId:string):Promise<WebhookDelivery> {
+  const endpoints=await this.listEndpoints(workspaceId);
+  const {data:original,error}=await supabaseAdmin.from('webhook_deliveries').select('*').eq('id',deliveryId).in('webhook_endpoint_id',endpoints.map(e=>e.id)).maybeSingle();
+  if(error||!original)throw AppError.notFound('Webhook delivery not found');
+  const {data,error:insertError}=await supabaseAdmin.from('webhook_deliveries').insert({id:generateId('evt'),webhook_endpoint_id:original.webhook_endpoint_id,event_type:original.event_type,event_id:original.event_id,payload:original.payload,status:'pending',attempt_count:0,next_attempt_at:new Date().toISOString()}).select('*').single();
+  if(insertError)throw AppError.serviceUnavailable('Could not queue webhook replay');
+  return data;
+ },
+ async dispatchPending(workspaceId?:string):Promise<boolean> {
+  const {data,error}=await supabaseAdmin.rpc('claim_webhook_delivery',{p_workspace:workspaceId||null});
+  if(error)throw AppError.serviceUnavailable('Webhook queue unavailable');
+  const delivery=data?.[0];if(!delivery)return false;
+  const {data:endpoint,error:endpointError}=await supabaseAdmin.from('webhook_endpoints').select('*').eq('id',delivery.webhook_endpoint_id).eq('status','active').maybeSingle();
+  if(endpointError)throw AppError.serviceUnavailable('Webhook endpoint unavailable');
+  let status=0;
+  try {
+   if(endpoint){const body=JSON.stringify(delivery.payload);const signature=crypto.createHmac('sha256',endpoint.secret_hash).update(body).digest('hex');status=await sendWebhook(endpoint.url,body,{'Content-Type':'application/json','X-Media-Event':delivery.event_type,'X-Media-Delivery':delivery.id,'X-Media-Event-Id':delivery.event_id,'X-Media-Signature':signature});}
+  }catch{/* Record bounded, retryable failure without endpoint URLs or secrets. */}
+  const delivered=status>=200&&status<300;
+  const next=new Date(Date.now()+Math.min(3600000,10000*2**delivery.attempt_count)).toISOString();
+  const {error:saveError}=await supabaseAdmin.from('webhook_deliveries').update({status:delivered?'delivered':delivery.attempt_count>=8||!endpoint?'failed':'pending',http_status:status||null,response_summary:status?'HTTP '+status:'Delivery unavailable',next_attempt_at:delivered?null:next,lease_token:null,lease_expires_at:null}).eq('id',delivery.id).eq('lease_token',delivery.lease_token);
+  if(saveError)throw AppError.serviceUnavailable('Webhook outcome could not be saved');
+  return true;
+ }
 };
-

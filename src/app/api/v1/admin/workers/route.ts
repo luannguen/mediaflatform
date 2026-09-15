@@ -1,3 +1,4 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest } from '@/lib/security/auth-guard';
 import { workerFleetService } from '@/services/workerFleetService';
@@ -11,7 +12,7 @@ export const dynamic = 'force-dynamic';
  * Admin Operational Fleet Visibility: Returns list of registered worker instances,
  * active heartbeats, processing capabilities, and stale state.
  */
-export async function GET(req: NextRequest) {
+async function handleGET(req: NextRequest) {
   const requestId = extractRequestId(req);
   try {
     const principal = await authenticateRequest(req, 'system:read');
@@ -40,3 +41,5 @@ export async function GET(req: NextRequest) {
     return errorResponse(error, requestId);
   }
 }
+
+export const GET = withApiRoute(handleGET, 'system:read');

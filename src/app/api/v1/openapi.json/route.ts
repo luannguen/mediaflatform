@@ -1,9 +1,10 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextResponse } from 'next/server';
 import { openApiSpec } from '@/openapi/spec';
 
 export const dynamic = 'force-dynamic';
 
-export async function GET() {
+async function handleGET() {
   return NextResponse.json(openApiSpec, {
     status: 200,
     headers: {
@@ -25,3 +26,5 @@ export async function OPTIONS() {
     },
   });
 }
+
+export const GET = withApiRoute(handleGET);

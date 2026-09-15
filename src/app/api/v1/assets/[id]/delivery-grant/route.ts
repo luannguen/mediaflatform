@@ -1,3 +1,4 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest } from 'next/server';
 import { authenticateRequest } from '@/lib/security/auth-guard';
 import { assetService } from '@/services/assetService';
@@ -138,10 +139,14 @@ async function handleDeliveryGrant(req: NextRequest, paramsPromise: Promise<{ id
   }
 }
 
-export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+async function handleGET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return handleDeliveryGrant(req, params);
 }
 
-export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+async function handlePOST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return handleDeliveryGrant(req, params);
 }
+
+export const GET = withApiRoute(handleGET);
+
+export const POST = withApiRoute(handlePOST);

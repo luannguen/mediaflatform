@@ -24,7 +24,7 @@ export function isAllowedOrigin(origin: string, customAllowedOrigins: string[] =
 
   const originLower = origin.trim().toLowerCase();
 
-  if (allowlist.has('*') || allowlist.has(originLower)) {
+  if (allowlist.has(originLower)) {
     return true;
   }
 
@@ -48,7 +48,7 @@ export function isAllowedOrigin(origin: string, customAllowedOrigins: string[] =
  */
 export function isPublicResource(pathname: string): boolean {
   return (
-    pathname.startsWith('/api/v1/delivery/') ||
+    (pathname.startsWith('/api/v1/delivery/') && pathname !== '/api/v1/delivery/grants') ||
     pathname === '/api/openapi.json' ||
     pathname === '/api/v1/openapi.json' ||
     pathname === '/api/v1/capabilities' ||

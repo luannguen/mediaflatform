@@ -1,3 +1,4 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest } from 'next/server';
 import { collectionService } from '@/services/collectionService';
 import { assetService } from '@/services/assetService';
@@ -5,7 +6,7 @@ import { authenticateRequest } from '@/lib/security/auth-guard';
 import { successResponse, errorResponse } from '@/lib/errors/response';
 import { AppError } from '@/lib/errors/app-error';
 
-export async function GET(
+async function handleGET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -28,7 +29,7 @@ export async function GET(
   }
 }
 
-export async function POST(
+async function handlePOST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -53,3 +54,9 @@ export async function POST(
     return errorResponse(error);
   }
 }
+
+export const dynamic = 'force-dynamic';
+
+export const GET = withApiRoute(handleGET, 'collections:read');
+
+export const POST = withApiRoute(handlePOST, 'collections:write');

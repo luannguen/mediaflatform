@@ -1,9 +1,10 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest } from 'next/server';
 import { authenticateRequest } from '@/lib/security/auth-guard';
 import { uploadSessionService } from '@/services/uploadSessionService';
 import { successResponse, errorResponse } from '@/lib/errors/response';
 
-export async function POST(
+async function handlePOST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -45,3 +46,7 @@ export async function POST(
     return errorResponse(error);
   }
 }
+
+export const dynamic = 'force-dynamic';
+
+export const POST = withApiRoute(handlePOST, 'uploads:create');

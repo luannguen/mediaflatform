@@ -567,7 +567,6 @@ export class MediaClient {
   static verifyWebhookSignature(payloadString: string, signature: string, secret: string): boolean {
     try {
       if (typeof process !== 'undefined' && process.versions && process.versions.node) {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
         const crypto = require('crypto');
         const expected = crypto.createHmac('sha256', secret).update(payloadString).digest('hex');
         if (signature.length !== expected.length) return false;

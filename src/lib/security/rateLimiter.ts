@@ -1,3 +1,4 @@
+import { assertPersistentBackend } from '@/lib/platform/persistence-mode';
 import { isSupabaseAdminConfigured, supabaseAdmin } from '@/lib/supabase/admin';
 
 export type RouteClass = 'read' | 'write' | 'upload' | 'expensive_transform' | 'admin' | 'default';
@@ -95,6 +96,7 @@ export const rateLimiter = {
 
     // Fast atomic in-memory check for offline/testing mode without Supabase
     if (!isSupabaseAdminConfigured()) {
+      assertPersistentBackend('request protection');
       let bucket = memoryBuckets.get(bucketKey);
       if (!bucket || now >= bucket.resetAt) {
         bucket = { tokens: limit - 1, resetAt: now + windowMs };

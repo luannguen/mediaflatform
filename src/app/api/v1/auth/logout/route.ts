@@ -1,7 +1,8 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextResponse } from 'next/server';
 import { SESSION_COOKIE_NAME } from '@/lib/auth/session';
 
-export async function POST() {
+async function handlePOST() {
   const response = NextResponse.json({
     success: true,
     message: 'Logged out successfully',
@@ -17,3 +18,7 @@ export async function POST() {
 
   return response;
 }
+
+export const dynamic = 'force-dynamic';
+
+export const POST = withApiRoute(handlePOST);

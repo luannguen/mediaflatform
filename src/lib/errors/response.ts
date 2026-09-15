@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { AppError } from './app-error';
 import { ErrorCodes } from './codes';
+import { requestState } from '@/lib/platform/requestState';
 
 export interface ApiResponseMeta {
   request_id?: string;
@@ -22,7 +23,7 @@ export function successResponse<T>(
   status: number = 200,
   customHeaders: Record<string, string> = {}
 ) {
-  const reqId = meta.request_id || `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const reqId = meta.request_id || requestState.getStore()?.requestId || `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
   return NextResponse.json(
     {
@@ -46,7 +47,7 @@ export function successResponse<T>(
 
 export function errorResponse(
   error: unknown,
-  requestId: string = `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+  requestId: string = requestState.getStore()?.requestId || `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
   customHeaders: Record<string, string> = {}
 ) {
   const headers = {
@@ -60,9 +61,9 @@ export function errorResponse(
         success: false,
         error: {
           code: error.code,
-          message: error.message,
+          message: error.statusCode >= 500 ? 'Service temporarily unavailable. Contact support with the request ID.' : error.message,
           request_id: requestId,
-          ...(error.details ? { details: error.details } : {}),
+          ...(error.details && error.statusCode < 500 ? { details: error.details } : {}),
         },
       },
       {
@@ -72,8 +73,8 @@ export function errorResponse(
     );
   }
 
-  const message = error instanceof Error ? error.message : 'An unexpected error occurred';
-  console.error('[API_ERROR]', requestId, error);
+  const message = 'An unexpected error occurred. Contact support with the request ID.';
+  console.error('[API_ERROR]', requestId, error instanceof Error ? error.name : 'UnknownError');
 
   return NextResponse.json(
     {

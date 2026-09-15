@@ -1,3 +1,4 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest } from '@/lib/security/auth-guard';
 import { extractRequestId } from '@/lib/platform/requestContext';
@@ -12,7 +13,7 @@ export const dynamic = 'force-dynamic';
  * Authenticated Developer Diagnostics: Returns the caller's execution context, granted scopes,
  * quota, and environment without leaking any credentials or hashes.
  */
-export async function GET(req: NextRequest) {
+async function handleGET(req: NextRequest) {
   const requestId = extractRequestId(req);
   try {
     const principal = await authenticateRequest(req);
@@ -66,3 +67,5 @@ export async function GET(req: NextRequest) {
     return errorResponse(error, requestId);
   }
 }
+
+export const GET = withApiRoute(handleGET);

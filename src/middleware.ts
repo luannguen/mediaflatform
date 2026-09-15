@@ -1,3 +1,4 @@
+import { safeRedirect } from '@/lib/auth/redirect';
 import { NextRequest, NextResponse } from 'next/server';
 import { SESSION_COOKIE_NAME, verifySessionToken } from '@/lib/auth/session';
 import { handleCorsPreflight, applyCorsHeaders } from '@/lib/security/cors';
@@ -58,7 +59,7 @@ export async function middleware(req: NextRequest) {
   if (pathname === '/login') {
     // If already logged in, redirect straight to dashboard
     if (session) {
-      const redirectUrl = req.nextUrl.searchParams.get('redirect') || '/';
+      const redirectUrl = safeRedirect(req.nextUrl.searchParams.get('redirect'));
       return NextResponse.redirect(new URL(redirectUrl, req.url));
     }
     return NextResponse.next();

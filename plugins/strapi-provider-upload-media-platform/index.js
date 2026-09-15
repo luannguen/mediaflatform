@@ -5,7 +5,12 @@
  * Compatible with Strapi v4 & v5
  */
 
-const FormData = require('form-data');
+const fs = require('node:fs');
+const fsp = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const { pipeline } = require('node:stream/promises');
+const { Transform } = require('node:stream');
 const fetch = require('node-fetch');
 
 module.exports = {
@@ -21,45 +26,36 @@ module.exports = {
     const cleanBaseUrl = baseUrl.replace(/\/+$/, '');
 
     const uploadFile = async (file) => {
-      const form = new FormData();
-
-      // Strapi provides file.stream or file.buffer
-      if (file.stream) {
-        form.append('file', file.stream, {
-          filename: `${file.hash}${file.ext}`,
-          contentType: file.mime,
-        });
-      } else if (file.buffer) {
-        form.append('file', file.buffer, {
-          filename: `${file.hash}${file.ext}`,
-          contentType: file.mime,
-        });
-      } else {
-        throw new Error('File buffer or stream not found in Strapi file object');
+      if (!apiKey) throw new Error('Media Platform API key is required');
+      let tempDir;
+      let source = file.buffer;
+      let size = source?.length;
+      const api = async (route, method, body) => {
+        const response = await fetch(cleanBaseUrl + route, { method, headers: { 'Content-Type': 'application/json', 'X-Media-Api-Key': apiKey }, body: body ? JSON.stringify(body) : undefined, timeout: 30000, redirect: 'error' });
+        const json = await response.json();
+        if (!response.ok) throw new Error('Media Platform request failed: ' + response.status + ' ' + (json.error?.code || 'API_ERROR'));
+        return json.data;
+      };
+      let asset;
+      try {
+        if (!source) {
+          if (!file.stream) throw new Error('File stream or buffer is required');
+          tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'media-platform-'));
+          const target = path.join(tempDir, 'upload');
+          let bytes = 0;
+          await pipeline(file.stream, new Transform({ transform(chunk, enc, cb) { bytes += chunk.length; cb(bytes > 500*1024*1024 ? new Error('File exceeds 500 MiB') : null, chunk); } }), fs.createWriteStream(target));
+          size = bytes; source = fs.createReadStream(target);
+        }
+        const created = await api('/api/v1/uploads/sessions', 'POST', { filename: file.hash + file.ext, file_size: size, mime_type: file.mime, visibility: 'public' });
+        const response = await fetch(created.capability.uploadUrl, { method: created.capability.method, headers: { ...created.capability.headers, 'Content-Length': String(size) }, body: source, timeout: 300000, redirect: 'error' });
+        if (!response.ok) throw new Error('Media Platform storage upload failed: ' + response.status);
+        const completed = await api('/api/v1/uploads/sessions/' + created.session.id + '/complete', 'POST', {});
+        asset = completed.asset;
+        if (collectionId) await api('/api/v1/collections/' + encodeURIComponent(collectionId) + '/assets', 'POST', { asset_ids: [asset.id] });
+      } finally {
+        if (source && typeof source.destroy === 'function') source.destroy();
+        if (tempDir) await fsp.rm(tempDir, { recursive: true, force: true });
       }
-
-      if (collectionId) {
-        form.append('collection_id', collectionId);
-      }
-
-      const headers = form.getHeaders();
-      if (apiKey) {
-        headers['Authorization'] = `Bearer ${apiKey}`;
-      }
-
-      const response = await fetch(`${cleanBaseUrl}/api/v1/uploads/direct`, {
-        method: 'POST',
-        headers,
-        body: form,
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Media Platform upload failed [${response.status}]: ${errorText}`);
-      }
-
-      const result = await response.json();
-      const asset = result.data;
 
       // Assign delivery CDN URL to Strapi file
       const deliveryUrl = `${cleanBaseUrl}/api/v1/delivery/${asset.id}?format=${defaultFormat}&quality=${defaultQuality}`;
@@ -106,7 +102,7 @@ module.exports = {
         });
 
         if (!res.ok) {
-          console.warn(`[MediaPlatform] Warning: Failed to delete asset ${assetId}`);
+          throw new Error('Media Platform could not trash the asset: ' + res.status);
         }
       },
       checkFileSize(file, { sizeLimit }) {

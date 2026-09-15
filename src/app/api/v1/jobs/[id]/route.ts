@@ -1,10 +1,11 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest } from 'next/server';
 import { authenticateRequest } from '@/lib/security/auth-guard';
 import { successResponse, errorResponse } from '@/lib/errors/response';
 import { jobQueueService } from '@/services/jobQueueService';
 import { AppError } from '@/lib/errors/app-error';
 
-export async function GET(
+async function handleGET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -22,3 +23,7 @@ export async function GET(
     return errorResponse(error);
   }
 }
+
+export const dynamic = 'force-dynamic';
+
+export const GET = withApiRoute(handleGET, 'assets:read');

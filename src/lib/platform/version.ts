@@ -3,6 +3,6 @@
  * Single Source of Truth for runtime versions across API, Health, Capabilities, and SDK.
  */
 
-export const PLATFORM_VERSION = '3.8.4';
+export const PLATFORM_VERSION = '3.8.5';
 export const API_VERSION = 'v1';
-export const BUILD_DATE = '2026-09-10';
+export const BUILD_DATE = '2026-09-14';

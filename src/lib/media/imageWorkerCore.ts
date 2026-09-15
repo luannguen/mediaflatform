@@ -13,6 +13,7 @@ export interface ImageWorkerContext {
   asset: Asset;
   outputVersion: string;
   workDir?: string;
+  sourcePath?: string;
   bucket?: string;
   abortSignal?: AbortSignal;
   storageUploader?: (data: Buffer, key: string, mime: string) => Promise<any>;
@@ -33,8 +34,8 @@ export const imageWorkerCore = {
     }
 
     // 1. Download source image
-    let sourceBuffer: Buffer | null = null;
-    if (isSupabaseAdminConfigured()) {
+    let sourceBuffer: Buffer | null = ctx.sourcePath ? fs.readFileSync(ctx.sourcePath) : null;
+    if (!sourceBuffer && isSupabaseAdminConfigured()) {
       const { data, error } = await supabaseAdmin.storage
         .from(process.env.SUPABASE_STORAGE_BUCKET || 'media-assets')
         .download(asset.storage_key);
@@ -54,7 +55,7 @@ export const imageWorkerCore = {
     }
 
     // 2. Probe metadata & auto-orient
-    let sharpPipeline = sharp(sourceBuffer).rotate(); // auto-orient based on EXIF
+    let sharpPipeline = sharp(sourceBuffer, { limitInputPixels: 16 * 1024 * 1024 }).rotate(); // auto-orient based on EXIF
     const metadata = await sharpPipeline.metadata();
 
     const origWidth = metadata.width || asset.width || 800;
@@ -62,13 +63,13 @@ export const imageWorkerCore = {
 
     // 3. Extract Dominant Color & 5-color palette
     let palette: { dominant: string; colors: string[]; is_dark: boolean } = {
-      dominant: '#3b82f6',
-      colors: ['#3b82f6', '#60a5fa', '#1d4ed8', '#93c5fd', '#1e3a8a'],
+      dominant: '',
+      colors: [],
       is_dark: false,
     };
 
     try {
-      const stats = await sharp(sourceBuffer).stats();
+      const stats = await sharp(sourceBuffer, { limitInputPixels: 16 * 1024 * 1024 }).stats();
       const r = Math.round(stats.channels[0].mean);
       const g = Math.round(stats.channels[1].mean);
       const b = Math.round(stats.channels[2].mean);
@@ -79,11 +80,11 @@ export const imageWorkerCore = {
       const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
       palette = {
         dominant: dominantHex,
-        colors: [dominantHex, toHex(r + 30, g + 30, b + 30), toHex(r - 30, g - 30, b - 30), toHex(r + 60, g - 20, b + 40), toHex(r - 40, g - 40, b + 20)],
+        colors: [dominantHex],
         is_dark: luminance < 0.5,
       };
     } catch {
-      // Fallback
+      // Color analysis is optional; leave it absent rather than inventing colors.
     }
 
     if (ctx.progressUpdater) {
@@ -115,7 +116,7 @@ export const imageWorkerCore = {
       }
 
       // Resize preserving aspect ratio, strip GPS EXIF, WebP format
-      const variantBuffer = await sharp(sourceBuffer)
+      const variantBuffer = await sharp(sourceBuffer, { limitInputPixels: 16 * 1024 * 1024 })
         .rotate()
         .resize({ width: profile.width, withoutEnlargement: true })
         .webp({ quality: 80 })

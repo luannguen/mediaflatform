@@ -1,208 +1,64 @@
 import { StorageProvider, StorageUploadResult, DirectUploadCapability, ObjectMetadata } from './provider';
 import { supabaseAdmin, isSupabaseAdminConfigured } from '../supabase/admin';
-import fs from 'fs';
-import path from 'path';
 
+export function assertStorageKey(key: string) {
+  if (!key || key.length > 1024 || /[\\\x00-\x1f]/.test(key) || key.startsWith('/') || key.split('/').some(p => !p || p === '.' || p === '..')) throw new Error('Invalid storage key');
+  if (!isSupabaseAdminConfigured()) throw new Error('Storage backend is not configured');
+}
 export class SupabaseStorageProvider implements StorageProvider {
-  public readonly name = 'supabase';
-  private defaultBucket: string;
-
-  constructor(defaultBucket: string = process.env.SUPABASE_STORAGE_BUCKET || 'media-assets') {
-    this.defaultBucket = defaultBucket;
+  readonly name = 'supabase';
+  constructor(private defaultBucket = process.env.SUPABASE_STORAGE_BUCKET || 'media-assets') {}
+  async upload(data: Buffer | Uint8Array | Blob, key: string, mimeType: string, bucket = this.defaultBucket): Promise<StorageUploadResult> {
+    assertStorageKey(key);
+    const { error } = await supabaseAdmin.storage.from(bucket).upload(key, data, { contentType: mimeType, upsert: true });
+    if (error) throw new Error('Storage upload failed: ' + error.name);
+    return { storageKey: key, storageUrl: this.getPublicUrl(key, bucket), sizeBytes: data instanceof Blob ? data.size : data.byteLength, mimeType };
   }
-
-  private saveToLocalCache(key: string, data: Buffer | Uint8Array | Blob, bucket: string) {
-    try {
-      const localDir = path.join(process.cwd(), 'scratch', 'storage', bucket, path.dirname(key));
-      if (!fs.existsSync(localDir)) fs.mkdirSync(localDir, { recursive: true });
-      const localFile = path.join(process.cwd(), 'scratch', 'storage', bucket, key);
-      if (data instanceof Buffer) fs.writeFileSync(localFile, data);
-      else if (data instanceof Uint8Array) fs.writeFileSync(localFile, Buffer.from(data));
-    } catch {
-      // Non-blocking local cache write
-    }
-  }
-
-  async upload(
-    data: Buffer | Uint8Array | Blob,
-    key: string,
-    mimeType: string,
-    bucket: string = this.defaultBucket
-  ): Promise<StorageUploadResult> {
-    const sizeBytes = data instanceof Blob ? data.size : data.byteLength;
-    this.saveToLocalCache(key, data, bucket);
-
-    if (!isSupabaseAdminConfigured()) {
-      let mockUrl = `https://mock-storage.media-platform.local/${bucket}/${key}`;
-      if (data instanceof Buffer) mockUrl = `data:${mimeType};base64,${data.toString('base64')}`;
-      else if (data instanceof Uint8Array) mockUrl = `data:${mimeType};base64,${Buffer.from(data).toString('base64')}`;
-      return { storageKey: key, storageUrl: mockUrl, sizeBytes, mimeType };
-    }
-
-    const { error } = await supabaseAdmin.storage.from(bucket).upload(key, data, {
-      contentType: mimeType,
-      upsert: true,
-    });
-    if (error) throw new Error(`Failed to upload to Supabase Storage: ${error.message}`);
-
-    return {
-      storageKey: key,
-      storageUrl: this.getPublicUrl(key, bucket),
-      sizeBytes,
-      mimeType,
-    };
-  }
-
-  async delete(key: string, bucket: string = this.defaultBucket): Promise<boolean> {
-    if (!isSupabaseAdminConfigured()) return true;
+  async delete(key: string, bucket = this.defaultBucket): Promise<boolean> {
+    assertStorageKey(key);
     const { error } = await supabaseAdmin.storage.from(bucket).remove([key]);
-    if (error) {
-      console.warn(`[Storage] Failed to delete object ${key}:`, error.message);
-      return false;
-    }
+    if (error) throw new Error('Storage deletion failed: ' + error.name);
     return true;
   }
-
-  async getSignedDownloadUrl(
-    key: string,
-    expiresInSeconds: number = 3600,
-    bucket: string = this.defaultBucket
-  ): Promise<string> {
-    if (!isSupabaseAdminConfigured()) {
-      return `https://mock-storage.media-platform.local/${bucket}/${key}?signed=true&expires=${expiresInSeconds}`;
-    }
+  async getSignedDownloadUrl(key: string, expiresInSeconds = 3600, bucket = this.defaultBucket): Promise<string> {
+    assertStorageKey(key);
     const { data, error } = await supabaseAdmin.storage.from(bucket).createSignedUrl(key, expiresInSeconds);
-    if (error || !data) throw new Error(`Failed to get signed URL: ${error?.message}`);
+    if (error || !data) throw new Error('Storage download capability failed');
     return data.signedUrl;
   }
-
-  getPublicUrl(key: string, bucket: string = this.defaultBucket): string {
-    if (!isSupabaseAdminConfigured()) {
-      return `https://mock-storage.media-platform.local/${bucket}/${key}`;
-    }
+  getPublicUrl(key: string, bucket = this.defaultBucket): string {
+    assertStorageKey(key);
+    // Historical metadata only: delivery clients must use the authenticated asset gateway.
     return supabaseAdmin.storage.from(bucket).getPublicUrl(key).data.publicUrl;
   }
-
-  async exists(key: string, bucket: string = this.defaultBucket): Promise<boolean> {
-    if (!isSupabaseAdminConfigured()) return true;
-    const { data, error } = await supabaseAdmin.storage.from(bucket).list('', { search: key });
-    if (error || !data) return false;
-    return data.some((item) => item.name === key);
-  }
-
-  async download(key: string, bucket: string = this.defaultBucket): Promise<Buffer | null> {
-    if (isSupabaseAdminConfigured()) {
-      try {
-        const { data, error } = await supabaseAdmin.storage.from(bucket).download(key);
-        if (!error && data) return Buffer.from(await data.arrayBuffer());
-      } catch (err: any) {
-        console.warn(`[Storage] Supabase download error for ${key}:`, err.message);
-      }
+  async exists(key: string, bucket = this.defaultBucket): Promise<boolean> { return Boolean(await this.getObjectMetadata(key, bucket)); }
+  async download(key: string, bucket = this.defaultBucket): Promise<Buffer | null> {
+    assertStorageKey(key);
+    const { data, error } = await supabaseAdmin.storage.from(bucket).download(key);
+    if (error) {
+      if ('statusCode' in error && String(error.statusCode) === '404') return null;
+      throw new Error('Storage download failed');
     }
-
-    try {
-      const localFile = path.join(process.cwd(), 'scratch', 'storage', bucket, key);
-      if (fs.existsSync(localFile)) return fs.readFileSync(localFile);
-    } catch {}
-    return null;
+    return data ? Buffer.from(await data.arrayBuffer()) : null;
   }
-
-  async createPresignedUploadUrl(
-    key: string,
-    mimeType: string,
-    expiresInSeconds: number = 900,
-    bucket: string = this.defaultBucket
-  ) {
-    if (!isSupabaseAdminConfigured()) {
-      return {
-        uploadUrl: `http://localhost:3000/api/v1/uploads/direct-mock?key=${encodeURIComponent(key)}`,
-        storageKey: key,
-        method: 'PUT' as const,
-        expiresInSeconds,
-      };
-    }
-
-    const { data, error } = await supabaseAdmin.storage.from(bucket).createSignedUploadUrl(key);
-    if (error || !data) throw new Error(`Failed to create presigned upload URL: ${error?.message}`);
-
-    return {
-      uploadUrl: data.signedUrl,
-      storageKey: key,
-      token: data.token,
-      method: 'PUT' as const,
-      headers: { 'Content-Type': mimeType },
-      expiresInSeconds,
-    };
+  async createPresignedUploadUrl(key: string, mimeType: string, _expiresInSeconds = 7200, bucket = this.defaultBucket) {
+    assertStorageKey(key);
+    const { data, error } = await supabaseAdmin.storage.from(bucket).createSignedUploadUrl(key, { upsert: false });
+    if (error || !data) throw new Error('Storage upload capability failed');
+    return { uploadUrl: data.signedUrl, storageKey: key, token: data.token, method: 'PUT' as const, headers: { 'Content-Type': mimeType }, expiresInSeconds: 7200 };
   }
-
-  async getObjectMetadata(key: string, bucket: string = this.defaultBucket): Promise<ObjectMetadata | null> {
-    if (!isSupabaseAdminConfigured()) {
-      try {
-        const localFile = path.join(process.cwd(), 'scratch', 'storage', bucket, key);
-        if (fs.existsSync(localFile)) {
-          const stats = fs.statSync(localFile);
-          return { sizeBytes: stats.size, lastModified: stats.mtime };
-        }
-      } catch {}
-      return null;
+  async getObjectMetadata(key: string, bucket = this.defaultBucket): Promise<ObjectMetadata | null> {
+    assertStorageKey(key);
+    const { data, error } = await supabaseAdmin.storage.from(bucket).info(key);
+    if (error) {
+      if ('statusCode' in error && String(error.statusCode) === '404') return null;
+      throw new Error('Storage metadata unavailable');
     }
-
-    try {
-      const { data, error } = await supabaseAdmin.storage.from(bucket).info(key);
-      if (error || !data) return null;
-      return {
-        sizeBytes: Number(data.size || 0),
-        contentType: data.contentType,
-        etag: data.etag,
-        lastModified: data.lastModified ? new Date(data.lastModified) : undefined,
-      };
-    } catch {
-      return null;
-    }
+    return data ? { sizeBytes: Number(data.size), contentType: data.contentType, etag: data.etag, lastModified: data.lastModified ? new Date(data.lastModified) : undefined } : null;
   }
-
-  async createDirectUploadSession(params: {
-    key: string;
-    mimeType: string;
-    sizeBytes?: number;
-    expiresInSeconds?: number;
-    bucket?: string;
-    preferProtocol?: 'signed-put' | 'tus';
-  }): Promise<DirectUploadCapability> {
+  async createDirectUploadSession(params: {key: string; mimeType: string; sizeBytes?: number; expiresInSeconds?: number; bucket?: string; preferProtocol?: 'signed-put' | 'tus'}): Promise<DirectUploadCapability> {
     const bucket = params.bucket || this.defaultBucket;
-    const expiresInSeconds = params.expiresInSeconds || 900;
-    const expiresAt = new Date(Date.now() + expiresInSeconds * 1000).toISOString();
-
-    // Correctness gate: TUS is not advertised until first-party clients implement the
-    // full create-resource/PATCH/Upload-Offset protocol. Always issue signed-put today.
-    if (!isSupabaseAdminConfigured()) {
-      return {
-        protocol: 'signed-put',
-        uploadUrl: `http://localhost:3000/api/v1/uploads/direct-mock?key=${encodeURIComponent(params.key)}`,
-        method: 'PUT',
-        headers: { 'Content-Type': params.mimeType },
-        storageKey: params.key,
-        storageProvider: this.name,
-        storageBucket: bucket,
-        expiresInSeconds,
-        expiresAt,
-      };
-    }
-
-    const { data, error } = await supabaseAdmin.storage.from(bucket).createSignedUploadUrl(params.key);
-    if (error || !data) throw new Error(`Failed to create signed upload URL: ${error?.message}`);
-
-    return {
-      protocol: 'signed-put',
-      uploadUrl: data.signedUrl,
-      token: data.token,
-      method: 'PUT',
-      headers: { 'Content-Type': params.mimeType },
-      storageKey: params.key,
-      storageProvider: this.name,
-      storageBucket: bucket,
-      expiresInSeconds,
-      expiresAt,
-    };
+    const signed = await this.createPresignedUploadUrl(params.key, params.mimeType, 7200, bucket);
+    return { ...signed, protocol: 'signed-put', storageProvider: this.name, storageBucket: bucket, expiresAt: new Date(Date.now() + signed.expiresInSeconds * 1000).toISOString() };
   }
 }

@@ -102,7 +102,6 @@ export function MediaImage({
       }}
     >
       {placeholder === 'blur' && !isLoaded && (
-        // eslint-disable-next-line @next/next/no-img-element
         <img
           src={lqipUrl}
           alt=""
@@ -114,7 +113,6 @@ export function MediaImage({
       <picture>
         <source type="image/avif" srcSet={avifSrcSet} />
         <source type="image/webp" srcSet={webpSrcSet} />
-        {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src={defaultSrc}
           alt={alt || asset?.display_name || ''}

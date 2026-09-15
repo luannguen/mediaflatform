@@ -1,10 +1,11 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest } from 'next/server';
 import { folderService } from '@/services/folderService';
 import { authenticateRequest } from '@/lib/security/auth-guard';
 import { successResponse, errorResponse } from '@/lib/errors/response';
 import { AppError } from '@/lib/errors/app-error';
 
-export async function GET(req: NextRequest) {
+async function handleGET(req: NextRequest) {
   try {
     const principal = await authenticateRequest(req, 'folders:read');
     const { searchParams } = new URL(req.url);
@@ -17,7 +18,7 @@ export async function GET(req: NextRequest) {
   }
 }
 
-export async function POST(req: NextRequest) {
+async function handlePOST(req: NextRequest) {
   try {
     const principal = await authenticateRequest(req, 'folders:write');
     const body = await req.json();
@@ -30,3 +31,9 @@ export async function POST(req: NextRequest) {
     return errorResponse(error);
   }
 }
+
+export const dynamic = 'force-dynamic';
+
+export const GET = withApiRoute(handleGET, 'folders:read');
+
+export const POST = withApiRoute(handlePOST, 'folders:write');

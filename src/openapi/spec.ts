@@ -592,7 +592,6 @@ export const openApiSpec: Record<string, any> = {
         operationId: 'createPresignedUploadSession',
         summary: 'Create Presigned Upload Session',
         description: 'Initializes an upload session and provides direct upload credentials.',
-        parameters: [{ $ref: '#/components/parameters/IdempotencyKeyHeader' }],
         requestBody: {
           required: true,
           content: {
@@ -611,7 +610,7 @@ export const openApiSpec: Record<string, any> = {
       post: {
         operationId: 'confirmUpload',
         summary: 'Confirm Upload & Enqueue Processing',
-        description: 'Performs magic byte inspection, auto-quarantine, and enqueues job.',
+        description: 'Completes the durable session for the reserved asset ID. Source bytes are verified by the worker before publication. Uploads without a durable session return 409 and must be restarted.',
         requestBody: {
           required: true,
           content: {
@@ -696,6 +695,14 @@ export const openApiSpec: Record<string, any> = {
             content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } },
           },
         },
+      },
+    },
+    '/assets/{id}/restore': {
+      post: {
+        operationId: 'restoreAsset', summary: 'Restore Trashed Asset',
+        description: 'Requires assets:write. Restores a trashed asset unless permanent purge has begun.',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: { '200': { description: 'Asset restored' }, '403': { description: 'Permission denied' }, '409': { description: 'Invalid state or purge pending' } },
       },
     },
     '/assets/{id}/references': {
@@ -818,7 +825,7 @@ export const openApiSpec: Record<string, any> = {
       post: {
         operationId: 'createUploadSession',
         summary: 'Create Direct Upload Session',
-        description: 'Initiates a decoupled direct upload session returning a scoped storage capability (signed-put or tus).',
+        description: 'Initiates a decoupled direct upload session returning a scoped signed-put capability valid for 7200 seconds. Session expiry is 24 hours. Idempotency-Key is rejected because this response contains credentials.',
         responses: {
           '201': {
             description: 'Direct upload session and capability created',
@@ -832,7 +839,7 @@ export const openApiSpec: Record<string, any> = {
       post: {
         operationId: 'completeUploadSession',
         summary: 'Finalize Direct Upload Session',
-        description: 'Synchronously verifies storage metadata and commits the asset atomically via PostgreSQL RPC.',
+        description: 'Verifies object size and atomically creates a pending asset/job. The initiating identity must complete the session. Worker verifies MIME and SHA-256 before publication; delivery returns 425 until ready.',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
           '200': { description: 'Session completed (idempotent replay)' },
@@ -845,7 +852,7 @@ export const openApiSpec: Record<string, any> = {
       post: {
         operationId: 'refreshUploadCapability',
         summary: 'Refresh Direct Upload Capability',
-        description: 'Extends or refreshes upload capability TTL for long-running uploads.',
+        description: 'Initiating identity only. Refreshes the signed-put capability for 7200 seconds without extending the 24-hour session. Idempotency-Key is rejected.',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
           '200': { description: 'Refreshed capability' },
@@ -870,7 +877,7 @@ export const openApiSpec: Record<string, any> = {
       post: {
         operationId: 'createDemoSession',
         summary: 'Demo Session Broker',
-        description: 'Issues an HttpOnly session cookie for demo frontend exploration without exposing secrets.',
+        description: 'Disabled by default (404). Requires an explicitly configured demo workspace and verified demo user; never selects a production workspace automatically.',
         responses: {
           '200': { description: 'Session established' },
         },

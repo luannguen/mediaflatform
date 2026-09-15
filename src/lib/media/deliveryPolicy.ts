@@ -32,7 +32,7 @@ export function getDeliveryPolicy(
   if (isPrivate) {
     cacheControl = 'private, no-cache, no-store, must-revalidate';
   } else {
-    cacheControl = 'public, max-age=31536000, s-maxage=31536000, immutable';
+    cacheControl = 'public, max-age=0, must-revalidate';
   }
 
   // 2. Content-Disposition Header
@@ -57,6 +57,7 @@ export function getDeliveryPolicy(
     'Cache-Control': cacheControl,
     'Content-Disposition': contentDisposition,
     'X-Content-Type-Options': 'nosniff',
+    'Content-Security-Policy': "default-src 'none'; sandbox",
   };
   if (isPrivate) {
     headers['Referrer-Policy'] = 'no-referrer';
@@ -87,5 +88,5 @@ export function get304CacheControl(assetOrVisibility: Asset | Visibility | strin
   if (visibility === 'private' || visibility === 'workspace') {
     return 'private, no-cache, no-store, must-revalidate';
   }
-  return 'public, max-age=31536000, s-maxage=31536000, immutable';
+  return 'public, max-age=0, must-revalidate';
 }

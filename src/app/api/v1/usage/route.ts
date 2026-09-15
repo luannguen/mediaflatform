@@ -1,3 +1,4 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest } from '@/lib/security/auth-guard';
 import { usageService } from '@/services/usageService';
@@ -10,7 +11,7 @@ export const dynamic = 'force-dynamic';
  * GET /api/v1/usage
  * Returns workspace resource consumption, capacity limits, and quota percentages.
  */
-export async function GET(req: NextRequest) {
+async function handleGET(req: NextRequest) {
   const requestId = extractRequestId(req);
   try {
     const principal = await authenticateRequest(req, 'usage:read');
@@ -33,3 +34,5 @@ export async function GET(req: NextRequest) {
     return errorResponse(error, requestId);
   }
 }
+
+export const GET = withApiRoute(handleGET, 'usage:read');

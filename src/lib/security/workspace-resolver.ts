@@ -1,3 +1,4 @@
+import { requireActiveIdentity } from '@/lib/auth/server';
 import { Workspace, WorkspaceMembership } from '@/types/database';
 import { UserRole } from '@/lib/auth/session';
 import { supabaseAdmin, isSupabaseAdminConfigured } from '@/lib/supabase/admin';
@@ -83,6 +84,7 @@ export async function resolveAuthorizedWorkspace(
   }
 
   if (isPersistentMode() && isSupabaseAdminConfigured()) {
+    await requireActiveIdentity(userId);
     const { data: memberRows, error: memberErr } = await supabaseAdmin
       .from('workspace_memberships')
       .select('*')

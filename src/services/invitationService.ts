@@ -1,184 +1,41 @@
-import { WorkspaceInvitation, WorkspaceMembership } from '@/types/database';
-import { mockDb } from '@/lib/mock/store';
-import { generateId } from '@/lib/ids/generator';
+import { WorkspaceInvitation } from '@/types/database';
+import { supabaseAdmin } from '@/lib/supabase/admin';
 import { AppError } from '@/lib/errors/app-error';
-import { ErrorCodes } from '@/lib/errors/codes';
 import { UserRole } from '@/lib/auth/session';
 
+function fail(error: { message: string }): never {
+  if (/WORKSPACE_ACCESS_DENIED|VERIFIED_IDENTITY_REQUIRED/.test(error.message)) throw AppError.forbidden('Verified workspace membership is required');
+  if (/NOT_FOUND/.test(error.message)) throw AppError.notFound('Invitation not found');
+  if (/ALREADY_MEMBER|EXPIRED_OR_PROCESSED/.test(error.message)) throw AppError.conflict('Invitation has expired, was processed, or the user is already a member');
+  if (/INVALID_/.test(error.message)) throw AppError.badRequest('Invalid invitation');
+  throw AppError.internal('Invitation persistence failed');
+}
+
 export const invitationService = {
-  /**
-   * List all pending invitations sent to a user's email address
-   */
   async getPendingInvitationsForEmail(email: string): Promise<WorkspaceInvitation[]> {
-    if (!email) return [];
-    const normalizedEmail = email.toLowerCase().trim();
-    return mockDb.invitations.filter(
-      (inv) => inv.invitee_email.toLowerCase().trim() === normalizedEmail && inv.status === 'pending'
-    );
+    const { data, error } = await supabaseAdmin.from('workspace_invitations').select('*')
+      .eq('invitee_email', email.toLowerCase().trim()).eq('status', 'pending').gt('expires_at', new Date().toISOString()).order('created_at', { ascending: false }).limit(100);
+    if (error) fail(error);
+    return data || [];
   },
-
-  /**
-   * List all invitations issued by a specific workspace
-   */
   async getWorkspaceInvitations(workspaceId: string): Promise<WorkspaceInvitation[]> {
-    return mockDb.invitations.filter((inv) => inv.workspace_id === workspaceId);
+    const { data, error } = await supabaseAdmin.from('workspace_invitations').select('*').eq('workspace_id', workspaceId).order('created_at', { ascending: false }).limit(100);
+    if (error) fail(error);
+    return data || [];
   },
-
-  /**
-   * Create and send an invitation to join a workspace
-   */
-  async createInvitation(
-    workspaceId: string,
-    inviter: { id: string; name: string },
-    inviteeEmail: string,
-    role: UserRole
-  ): Promise<WorkspaceInvitation> {
-    const normalizedEmail = inviteeEmail.toLowerCase().trim();
-    if (!normalizedEmail || !normalizedEmail.includes('@')) {
-      throw AppError.badRequest('A valid email address is required', ErrorCodes.VALIDATION_ERROR);
-    }
-
-    const ws = mockDb.workspaces.find((w) => w.id === workspaceId);
-    if (!ws) {
-      throw AppError.notFound('Target workspace not found', ErrorCodes.NOT_FOUND);
-    }
-
-    // Check if user is already a member
-    const existingMember = mockDb.workspaceMemberships.find(
-      (m) =>
-        m.workspace_id === workspaceId &&
-        m.status === 'active' &&
-        m.user_email?.toLowerCase().trim() === normalizedEmail
-    );
-    if (existingMember) {
-      throw AppError.conflict('User is already a member of this workspace', ErrorCodes.RESOURCE_CONFLICT);
-    }
-
-    // Check if pending invite already exists
-    const existingInvite = mockDb.invitations.find(
-      (inv) =>
-        inv.workspace_id === workspaceId &&
-        inv.invitee_email.toLowerCase().trim() === normalizedEmail &&
-        inv.status === 'pending'
-    );
-    if (existingInvite) {
-      return existingInvite;
-    }
-
-    const now = new Date();
-    const expiresAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000); // 7 days expiration
-
-    const invitation: WorkspaceInvitation = {
-      id: generateId('inv'),
-      workspace_id: workspaceId,
-      workspace_name: ws.name,
-      inviter_user_id: inviter.id,
-      inviter_name: inviter.name,
-      invitee_email: normalizedEmail,
-      role,
-      status: 'pending',
-      created_at: now.toISOString(),
-      expires_at: expiresAt.toISOString(),
-    };
-
-    mockDb.invitations.push(invitation);
-    return invitation;
+  async createInvitation(workspaceId: string, inviter: { id: string; name: string }, email: string, role: UserRole): Promise<WorkspaceInvitation> {
+    const { data, error } = await supabaseAdmin.rpc('invite_workspace_member', { p_workspace_id: workspaceId, p_inviter_id: inviter.id, p_email: email, p_role: role });
+    if (error) fail(error);
+    return data;
   },
-
-  /**
-   * Accept an invitation and grant workspace membership
-   */
-  async acceptInvitation(
-    invitationId: string,
-    user: { id: string; email: string; name: string }
-  ): Promise<{ workspaceId: string; workspaceName: string; role: UserRole }> {
-    const normalizedEmail = user.email.toLowerCase().trim();
-    const invitation = mockDb.invitations.find(
-      (inv) =>
-        inv.id === invitationId &&
-        inv.invitee_email.toLowerCase().trim() === normalizedEmail &&
-        inv.status === 'pending'
-    );
-
-    if (!invitation) {
-      throw AppError.notFound('Invitation not found or already processed', ErrorCodes.NOT_FOUND);
-    }
-
-    // Check expiration
-    if (new Date(invitation.expires_at).getTime() < Date.now()) {
-      invitation.status = 'revoked';
-      throw AppError.badRequest('This invitation has expired', ErrorCodes.VALIDATION_ERROR);
-    }
-
-    // Mark invitation as accepted
-    invitation.status = 'accepted';
-
-    // Add membership
-    const now = new Date().toISOString();
-    const existingMembershipIndex = mockDb.workspaceMemberships.findIndex(
-      (m) => m.workspace_id === invitation.workspace_id && m.user_id === user.id
-    );
-
-    if (existingMembershipIndex >= 0) {
-      mockDb.workspaceMemberships[existingMembershipIndex].status = 'active';
-      mockDb.workspaceMemberships[existingMembershipIndex].role = invitation.role;
-    } else {
-      mockDb.workspaceMemberships.push({
-        id: generateId('mem'),
-        workspace_id: invitation.workspace_id,
-        user_id: user.id,
-        user_email: normalizedEmail,
-        user_name: user.name,
-        role_id: `role_${invitation.role}`,
-        role: invitation.role,
-        status: 'active',
-        invited_by: invitation.inviter_user_id,
-        joined_at: now,
-        created_at: now,
-        updated_at: now,
-      });
-    }
-
-    return {
-      workspaceId: invitation.workspace_id,
-      workspaceName: invitation.workspace_name,
-      role: invitation.role as UserRole,
-    };
+  async acceptInvitation(id: string, user: { id: string; email: string; name: string }) {
+    const { data, error } = await supabaseAdmin.rpc('respond_workspace_invitation', { p_invitation_id: id, p_user_id: user.id, p_action: 'accepted' });
+    if (error) fail(error);
+    return { workspaceId: data.workspace_id, workspaceName: data.workspace_name, role: data.role as UserRole };
   },
-
-  /**
-   * Decline an invitation
-   */
-  async declineInvitation(invitationId: string, userEmail: string): Promise<boolean> {
-    const normalizedEmail = userEmail.toLowerCase().trim();
-    const invitation = mockDb.invitations.find(
-      (inv) =>
-        inv.id === invitationId &&
-        inv.invitee_email.toLowerCase().trim() === normalizedEmail &&
-        inv.status === 'pending'
-    );
-
-    if (!invitation) {
-      throw AppError.notFound('Invitation not found', ErrorCodes.NOT_FOUND);
-    }
-
-    invitation.status = 'declined';
-    return true;
-  },
-
-  /**
-   * Revoke an invitation by workspace admin
-   */
-  async revokeInvitation(invitationId: string, workspaceId: string): Promise<boolean> {
-    const invitation = mockDb.invitations.find(
-      (inv) => inv.id === invitationId && inv.workspace_id === workspaceId
-    );
-
-    if (!invitation) {
-      throw AppError.notFound('Invitation not found', ErrorCodes.NOT_FOUND);
-    }
-
-    invitation.status = 'revoked';
+  async declineInvitation(id: string, userId: string): Promise<boolean> {
+    const { error } = await supabaseAdmin.rpc('respond_workspace_invitation', { p_invitation_id: id, p_user_id: userId, p_action: 'declined' });
+    if (error) fail(error);
     return true;
   },
 };

@@ -21,7 +21,8 @@ if (fs.existsSync(envPath)) {
 const { createClient } = require('@supabase/supabase-js');
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const salt = process.env.API_KEY_SECRET_SALT || 'dev_salt_antigravity_media_platform';
+const salt = process.env.API_KEY_SECRET_SALT;
+if (!salt || process.env.NODE_ENV !== 'test' || process.env.ALLOW_TEST_MOCKS !== 'true') throw new Error('Legacy demo seeding requires an isolated test environment and an explicit API key salt');
 
 if (!supabaseUrl || !supabaseKey) {
   console.error('❌ Supabase credentials missing in .env.local');

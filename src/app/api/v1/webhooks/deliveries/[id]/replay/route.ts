@@ -1,3 +1,4 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest } from 'next/server';
 import { authenticateRequest } from '@/lib/security/auth-guard';
 import { webhookService } from '@/services/webhookService';
@@ -9,7 +10,7 @@ import { successResponse, errorResponse } from '@/lib/errors/response';
  * POST /api/v1/webhooks/deliveries/[id]/replay
  * Safe Webhook Replay: Re-dispatches a past webhook delivery attempt without mutating historical attempts.
  */
-export async function POST(
+async function handlePOST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -42,3 +43,7 @@ export async function POST(
     return errorResponse(error, requestId);
   }
 }
+
+export const dynamic = 'force-dynamic';
+
+export const POST = withApiRoute(handlePOST, 'webhooks:write');

@@ -50,12 +50,12 @@ const navigation = [
   },
 ];
 
-export function AppSidebar() {
+export function AppSidebar({ compact = false, onNavigate }: { compact?: boolean; onNavigate?: () => void }) {
   const pathname = usePathname();
   const { user } = useAuth();
 
   return (
-    <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col flex-shrink-0 h-screen sticky top-0">
+    <aside aria-label="Main navigation" className={`bg-slate-900 border-r border-slate-800 flex flex-col flex-shrink-0 ${compact ? 'w-full max-h-[75dvh]' : 'w-64 h-screen sticky top-0'}`}>
       {/* Brand Header */}
       <div className="p-5 border-b border-slate-800 flex items-center gap-3">
         <div className="h-9 w-9 rounded-xl bg-violet-600 flex items-center justify-center text-white font-bold shadow-lg shadow-violet-600/30">
@@ -82,6 +82,8 @@ export function AppSidebar() {
                   <Link
                     key={item.name}
                     href={item.href}
+                    onClick={onNavigate}
+                    aria-current={isActive ? 'page' : undefined}
                     className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
                       isActive
                         ? 'bg-violet-600/15 text-violet-400 border border-violet-500/20'

@@ -1,10 +1,11 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest } from 'next/server';
 import { referenceService } from '@/services/referenceService';
 import { authenticateRequest } from '@/lib/security/auth-guard';
 import { successResponse, errorResponse } from '@/lib/errors/response';
 import { AppError } from '@/lib/errors/app-error';
 
-export async function POST(req: NextRequest) {
+async function handlePOST(req: NextRequest) {
   try {
     const principal = await authenticateRequest(req, 'references:write');
     const body = await req.json();
@@ -30,7 +31,7 @@ export async function POST(req: NextRequest) {
   }
 }
 
-export async function DELETE(req: NextRequest) {
+async function handleDELETE(req: NextRequest) {
   try {
     const principal = await authenticateRequest(req, 'references:write');
     const { searchParams } = new URL(req.url);
@@ -44,3 +45,9 @@ export async function DELETE(req: NextRequest) {
     return errorResponse(error);
   }
 }
+
+export const dynamic = 'force-dynamic';
+
+export const POST = withApiRoute(handlePOST, 'references:write');
+
+export const DELETE = withApiRoute(handleDELETE, 'references:write');

@@ -1,10 +1,11 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest } from 'next/server';
 import { developerService } from '@/services/developerService';
 import { authenticateRequest } from '@/lib/security/auth-guard';
 import { successResponse, errorResponse } from '@/lib/errors/response';
 import { AppError } from '@/lib/errors/app-error';
 
-export async function GET(req: NextRequest) {
+async function handleGET(req: NextRequest) {
   try {
     const principal = await authenticateRequest(req, 'application:read');
     const apps = await developerService.listApplications(principal.workspaceId);
@@ -19,7 +20,7 @@ export async function GET(req: NextRequest) {
   }
 }
 
-export async function POST(req: NextRequest) {
+async function handlePOST(req: NextRequest) {
   try {
     const principal = await authenticateRequest(req, 'application:manage');
     const body = await req.json();
@@ -46,3 +47,9 @@ export async function POST(req: NextRequest) {
     return errorResponse(error);
   }
 }
+
+export const dynamic = 'force-dynamic';
+
+export const GET = withApiRoute(handleGET, 'application:read');
+
+export const POST = withApiRoute(handlePOST, 'application:manage');

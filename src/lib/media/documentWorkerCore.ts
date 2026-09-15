@@ -1,3 +1,6 @@
+import { renderPdfPreview } from './pdfRenderer';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import sharp from 'sharp';
 import { Asset } from '@/types/database';
 import { getStorageProvider } from '@/lib/storage/factory';
@@ -10,6 +13,7 @@ export interface DocumentWorkerContext {
   asset: Asset;
   outputVersion: string;
   workDir?: string;
+  sourcePath?: string;
   abortSignal?: AbortSignal;
   storageUploader?: (data: Buffer, key: string, mime: string) => Promise<any>;
   fencedPublisher?: (manifest: Record<string, any>, variants: any[]) => Promise<boolean>;
@@ -28,77 +32,9 @@ export const documentWorkerCore = {
       await ctx.progressUpdater('probing', 20, { stage: 'probing_document' });
     }
 
-    // 1. Download document
-    let docBuffer: Buffer | null = null;
-    if (isSupabaseAdminConfigured()) {
-      const { data, error } = await supabaseAdmin.storage
-        .from(process.env.SUPABASE_STORAGE_BUCKET || 'media-assets')
-        .download(asset.storage_key);
-      if (!error && data) {
-        docBuffer = Buffer.from(await data.arrayBuffer());
-      }
-    }
-    if (!docBuffer) {
-      docBuffer = await storage.download(asset.storage_key);
-    }
-    if (!docBuffer || docBuffer.length === 0) {
-      throw new Error(`SOURCE_NOT_FOUND: Document ${asset.storage_key} could not be retrieved from storage`);
-    }
-
-    // 2. PDF Binary Validation
-    const isPdf = docBuffer.length >= 4 && docBuffer[0] === 0x25 && docBuffer[1] === 0x50 && docBuffer[2] === 0x44 && docBuffer[3] === 0x46; // %PDF
-    if (!isPdf && asset.mime_type === 'application/pdf') {
-      throw new Error('CORRUPTED_SOURCE: Document header does not match PDF signature');
-    }
-
-    // 3. Inspect page count from PDF markers
-    let pageCount = 1;
-    try {
-      const str = docBuffer.toString('latin1');
-      const pageMatches = str.match(/\/Type\s*\/Page[^s]/g);
-      if (pageMatches && pageMatches.length > 0) {
-        pageCount = pageMatches.length;
-      }
-    } catch {
-      // Default to 1
-    }
-
-    if (ctx.progressUpdater) {
-      await ctx.progressUpdater('generating_thumbnail', 50, { stage: 'thumbnail' });
-    }
-
-    // 4. Generate high-fidelity first-page document thumbnail WebP
-    // Render clean SVG document badge with title and page count, convert to WebP via Sharp
-    const escapedTitle = (asset.display_name || asset.original_filename || 'PDF Document')
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
-
-    const svgThumb = `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800" viewBox="0 0 600 800">
-      <defs>
-        <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stop-color="#1E293B"/>
-          <stop offset="100%" stop-color="#0F172A"/>
-        </linearGradient>
-        <linearGradient id="badge" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stop-color="#EF4444"/>
-          <stop offset="100%" stop-color="#DC2626"/>
-        </linearGradient>
-      </defs>
-      <rect width="600" height="800" fill="url(#bg)"/>
-      <rect x="40" y="40" width="520" height="720" rx="20" fill="#FFFFFF" fill-opacity="0.04" stroke="#334155" stroke-width="2"/>
-      <!-- PDF Badge -->
-      <rect x="80" y="80" width="100" height="40" rx="8" fill="url(#badge)"/>
-      <text x="130" y="106" fill="#FFFFFF" font-family="system-ui, sans-serif" font-size="20" font-weight="bold" text-anchor="middle">PDF</text>
-      <!-- Document icon -->
-      <path d="M260 260 H340 L380 300 V440 H260 Z" fill="#EF4444" fill-opacity="0.15" stroke="#EF4444" stroke-width="3"/>
-      <!-- Title -->
-      <text x="300" y="520" fill="#F8FAFC" font-family="system-ui, sans-serif" font-size="24" font-weight="bold" text-anchor="middle">${escapedTitle.slice(0, 30)}</text>
-      <!-- Page Count & Size -->
-      <text x="300" y="570" fill="#94A3B8" font-family="system-ui, sans-serif" font-size="16" text-anchor="middle">${pageCount} Page${pageCount > 1 ? 's' : ''} • ${(docBuffer.length / 1024).toFixed(0)} KB</text>
-    </svg>`;
-
-    const thumbWebp = await sharp(Buffer.from(svgThumb)).webp({ quality: 85 }).toBuffer();
+    if (!ctx.workDir || !ctx.sourcePath) throw new Error('Verified document source is required');
+    const docBuffer = await fs.readFile(ctx.sourcePath);
+    const { pageCount, thumbnail: thumbWebp } = await renderPdfPreview(ctx.sourcePath, ctx.workDir, ctx.abortSignal);
     const thumbKey = `documents/${asset.id}/${outputVersion}/thumbnail.webp`;
 
     if (ctx.storageUploader) {

@@ -1,3 +1,4 @@
+import { verifyAndStageSource } from '@/lib/media/verifySource';
 import { jobQueueService, LeaseLostError, LeaseContext } from './jobQueueService';
 import { assetService } from './assetService';
 import { webhookService } from './webhookService';
@@ -64,7 +65,9 @@ export const videoWorkerService = {
     }
 
     const outputVersion = `v${job.attempt || 1}_${(job.job_run_id || 'run').slice(-8)}`;
-    const workDir = path.join(process.cwd(), 'scratch', 'transcode', `${job.id}_${Date.now()}`);
+    const workRoot = path.resolve(process.cwd(), 'scratch', 'transcode');
+    fs.mkdirSync(workRoot, { recursive: true });
+    const workDir = fs.mkdtempSync(path.join(workRoot, 'job-'));
     const sourcePath = path.join(workDir, 'source.mp4');
 
     const abortController = new AbortController();
@@ -97,16 +100,20 @@ export const videoWorkerService = {
       }, 15000);
 
       const storage = getStorageProvider();
+      const verified = await verifyAndStageSource(asset, sourcePath, abortController.signal);
+      const { data: verifiedOk, error: verifiedError } = await supabaseAdmin.rpc('verify_job_source', { p_job_id: job.id, p_worker_id: workerId, p_run_id: job.job_run_id, p_checksum: verified.checksum });
+      if (verifiedError || !verifiedOk) throw new LeaseLostError('LEASE_LOST: Verification could not be committed');
 
       if (job.job_type === 'image_optimization') {
         const outputManifest = await imageWorkerCore.executePipeline({
+          sourcePath,
           jobId: job.id,
           workerId,
           runId: job.job_run_id || '',
           asset,
           outputVersion,
           workDir,
-          bucket: process.env.SUPABASE_STORAGE_BUCKET || 'media-assets',
+          bucket: asset.storage_bucket || process.env.SUPABASE_STORAGE_BUCKET || 'media-assets',
           abortSignal: abortController.signal,
           storageUploader: async (data, key, mimeType) => {
             return await storage.upload(data, key, mimeType);
@@ -138,6 +145,7 @@ export const videoWorkerService = {
           asset,
           outputVersion,
           workDir,
+          sourcePath,
           abortSignal: abortController.signal,
           storageUploader: async (data, key, mimeType) => {
             return await storage.upload(data, key, mimeType);
@@ -165,7 +173,7 @@ export const videoWorkerService = {
       } else {
         // Video transcode pipeline
         // Stage source video
-        await this.stageSourceVideo(asset, sourcePath);
+        // The verified source is already staged.
 
         const outputManifest = await mediaWorkerCore.executePipeline({
           jobId: job.id,
@@ -174,7 +182,7 @@ export const videoWorkerService = {
           asset,
           outputVersion,
           workDir,
-          bucket: process.env.SUPABASE_STORAGE_BUCKET || 'media-assets',
+          bucket: asset.storage_bucket || process.env.SUPABASE_STORAGE_BUCKET || 'media-assets',
           abortController,
           storageUploader: async (data, key, mimeType) => {
             return await storage.upload(data, key, mimeType);

@@ -5,6 +5,9 @@ import { mockWorkspace } from '@/lib/mock/store';
 import { AppError } from '@/lib/errors/app-error';
 import { ErrorCodes } from '@/lib/errors/codes';
 import { resolveAuthorizedWorkspace } from '@/lib/security/workspace-resolver';
+import crypto from 'node:crypto';
+import { hasScope } from './api-key';
+import { requestState } from '@/lib/platform/requestState';
 
 export interface AuthPrincipal {
   type: 'api_key' | 'user' | 'worker_service' | 'anonymous_dev';
@@ -42,7 +45,7 @@ const ROLE_DEFAULT_SCOPES: Record<UserRole, string[]> = {
 /**
  * Extract and authenticate principal from request headers or session cookies
  */
-export async function authenticateRequest(
+async function authenticateUncached(
   req: NextRequest,
   requiredScope?: string
 ): Promise<AuthPrincipal> {
@@ -52,12 +55,10 @@ export async function authenticateRequest(
   const workerServiceToken = process.env.WORKER_SERVICE_TOKEN;
   if (authHeader && authHeader.startsWith('Bearer sec_worker_')) {
     const candidateToken = authHeader.replace('Bearer ', '').trim();
-    if (workerServiceToken && candidateToken === workerServiceToken) {
+    if (workerServiceToken && candidateToken.length === workerServiceToken.length && crypto.timingSafeEqual(Buffer.from(candidateToken), Buffer.from(workerServiceToken))) {
       if (requiredScope) {
         const isAllowedWorkerScope =
-          WORKER_ALLOWED_SCOPES.includes(requiredScope) ||
-          requiredScope === 'jobs:*' ||
-          requiredScope.startsWith('jobs:');
+          WORKER_ALLOWED_SCOPES.includes(requiredScope);
 
         if (!isAllowedWorkerScope) {
           throw AppError.forbidden(
@@ -148,7 +149,7 @@ export async function authenticateRequest(
 
   // 3. Fallback for Local Development / Testing Scripts if explicitly passed
   const devKey = req.headers.get('X-Dev-Bypass');
-  if (devKey === 'media_dev_testing' || process.env.NODE_ENV === 'test') {
+  if (process.env.NODE_ENV === 'test' && process.env.ALLOW_TEST_AUTH_BYPASS === 'true' && devKey === 'media_dev_testing') {
     return {
       type: 'anonymous_dev',
       workspaceId: req.headers.get('X-Workspace-Id') || mockWorkspace.id,
@@ -161,4 +162,13 @@ export async function authenticateRequest(
     'Authentication required. Please provide a valid X-Media-Api-Key header or log in to the dashboard.',
     ErrorCodes.AUTH_REQUIRED
   );
+}
+
+export async function authenticateRequest(req: NextRequest, requiredScope?: string): Promise<AuthPrincipal> {
+  const state = requestState.getStore();
+  const principal = state?.principal || await authenticateUncached(req, requiredScope);
+  if (requiredScope && (!hasScope(principal.scopes, requiredScope) || principal.type === 'worker_service' && !WORKER_ALLOWED_SCOPES.includes(requiredScope))) throw AppError.forbidden('Required scope is missing');
+  if (requiredScope && ['jobs:claim','jobs:heartbeat','jobs:progress','jobs:complete','jobs:fail','jobs:process'].includes(requiredScope) && principal.type !== 'worker_service') throw AppError.forbidden('Worker credentials are required');
+  if (state) state.principal = principal;
+  return principal;
 }

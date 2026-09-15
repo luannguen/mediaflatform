@@ -1,10 +1,11 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest } from 'next/server';
 import { assetService } from '@/services/assetService';
 import { authenticateRequest } from '@/lib/security/auth-guard';
 import { successResponse, errorResponse } from '@/lib/errors/response';
 import { AppError } from '@/lib/errors/app-error';
 
-export async function POST(req: NextRequest) {
+async function handlePOST(req: NextRequest) {
   try {
     const principal = await authenticateRequest(req, 'assets:read');
     const body = await req.json();
@@ -50,3 +51,7 @@ export async function POST(req: NextRequest) {
     return errorResponse(error);
   }
 }
+
+export const dynamic = 'force-dynamic';
+
+export const POST = withApiRoute(handlePOST, 'assets:read');

@@ -1,5 +1,5 @@
 /**
- * @media-platform/sdk v3.8.4
+ * @media-platform/sdk v3.8.5
  * Official TypeScript Client SDK for Media Platform
  * Universal (Node.js 18+, Modern Browsers, Cloudflare Workers, Edge Runtimes)
  */
@@ -18,6 +18,8 @@ export interface RequestOptions extends RequestInit {
   idempotencyKey?: string;
   requestId?: string;
   skipRetry?: boolean;
+  /** Preserve the API envelope, including pagination metadata. */
+  rawResponse?: boolean;
 }
 
 export interface ApiResponse<T = any> {
@@ -70,7 +72,7 @@ export interface Asset {
   mime_type: string;
   size_bytes: number;
   visibility: 'public' | 'workspace' | 'private';
-  status: 'active' | 'quarantined' | 'trashed' | 'deleted';
+  status: 'uploading' | 'active' | 'quarantined' | 'trashed' | 'deleted';
   processing_status: 'pending' | 'processing' | 'ready' | 'failed';
   active_output_version?: string;
   storage_url?: string;
@@ -224,7 +226,7 @@ export class MediaPlatformClient {
     const headers = new Headers(options.headers || {});
     headers.set('X-Media-Api-Key', this.apiKey);
     headers.set('X-Request-Id', requestId);
-    headers.set('User-Agent', '@media-platform/sdk/3.8.2');
+    headers.set('User-Agent', '@media-platform/sdk/3.8.5');
 
     // Attach default headers
     for (const [k, v] of Object.entries(this.defaultHeaders)) {
@@ -241,22 +243,23 @@ export class MediaPlatformClient {
     }
 
     let attempt = 0;
-    const maxRetries = options.skipRetry ? 0 : this.maxRetries;
+    const replaySafe = ['GET','HEAD'].includes(method) || Boolean(options.idempotencyKey) || /\/uploads\/sessions\/[^/]+\/complete$/.test(path);
+    const maxRetries = options.skipRetry || !replaySafe ? 0 : this.maxRetries;
 
     while (true) {
       attempt++;
+      let timer: ReturnType<typeof setTimeout> | null = null;
       try {
         const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-        const timer = controller ? setTimeout(() => controller.abort(), this.timeoutMs) : null;
+        timer = controller ? setTimeout(() => controller.abort(), this.timeoutMs) : null;
 
         const response = await fetch(url, {
           ...options,
           method,
           headers,
-          signal: options.signal || controller?.signal,
+          signal: options.signal && controller ? AbortSignal.any([options.signal, controller.signal]) : options.signal || controller?.signal,
         });
 
-        if (timer) clearTimeout(timer);
 
         const responseRequestId = response.headers.get('x-request-id') || requestId;
         const text = await response.text();
@@ -268,7 +271,7 @@ export class MediaPlatformClient {
         }
 
         if (response.ok) {
-          return (json && json.data !== undefined ? json.data : json) as T;
+          return (options.rawResponse ? json : json && json.data !== undefined ? json.data : json) as T;
         }
 
         // Retryable status: 429 Too Many Requests, 502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout
@@ -291,7 +294,7 @@ export class MediaPlatformClient {
         if (err instanceof MediaPlatformError) throw err;
 
         // Network error retry
-        if (attempt <= maxRetries && !options.skipRetry) {
+        if (attempt <= maxRetries && !options.skipRetry && !options.signal?.aborted) {
           const delayMs = this.calculateBackoff(attempt);
           await new Promise((r) => setTimeout(r, delayMs));
           continue;
@@ -303,7 +306,7 @@ export class MediaPlatformClient {
           0,
           requestId
         );
-      }
+      } finally { if (timer) clearTimeout(timer); }
     }
   }
 
@@ -323,10 +326,10 @@ export class MediaPlatformClient {
       }
     }
     const qs = query.toString();
-    return this.request<{ assets: Asset[]; total?: number }>(`/api/v1/assets${qs ? `?${qs}` : ''}`, {
-      method: 'GET',
-      ...options,
+    const result = await this.request<ApiResponse<Asset[]>>(`/api/v1/assets${qs ? `?${qs}` : ''}`, {
+      method: 'GET', ...options, rawResponse: true,
     });
+    return { assets: result.data, total: result.meta?.pagination?.total };
   }
 
   async getAsset(id: string, options?: RequestOptions): Promise<Asset> {
@@ -358,25 +361,7 @@ export class MediaPlatformClient {
     opts: UploadOptions = {},
     options?: RequestOptions
   ): Promise<Asset> {
-    const formData = new FormData();
-    if (fileOrBlob instanceof Blob || (typeof File !== 'undefined' && fileOrBlob instanceof File)) {
-      formData.append('file', fileOrBlob);
-    } else {
-      const blob = new Blob([fileOrBlob as any]);
-      formData.append('file', blob, opts.displayName || 'uploaded-file');
-    }
-
-    if (opts.displayName) formData.append('display_name', opts.displayName);
-    if (opts.folderId) formData.append('folder_id', opts.folderId);
-    if (opts.visibility) formData.append('visibility', opts.visibility);
-    if (opts.tags && opts.tags.length > 0) formData.append('tags', JSON.stringify(opts.tags));
-    if (opts.metadata) formData.append('metadata', JSON.stringify(opts.metadata));
-
-    return this.request<Asset>('/api/v1/uploads', {
-      method: 'POST',
-      body: formData,
-      ...options,
-    });
+    return this.upload(fileOrBlob, { ...opts, signal: options?.signal || undefined }, options);
   }
 
   async deleteAsset(
@@ -409,8 +394,8 @@ export class MediaPlatformClient {
       if (transform.quality) params.set('q', String(transform.quality));
       if (transform.fit) params.set('fit', transform.fit);
       if (transform.watermark) params.set('watermark', transform.watermark);
-      if (transform.watermarkPos) params.set('watermarkPos', transform.watermarkPos);
-      if (transform.watermarkOpacity !== undefined) params.set('watermarkOpacity', String(transform.watermarkOpacity));
+      if (transform.watermarkPos) params.set('watermark_pos', transform.watermarkPos);
+      if (transform.watermarkOpacity !== undefined) params.set('watermark_opacity', String(transform.watermarkOpacity));
     }
     const query = params.toString();
     return `${this.baseUrl}/api/v1/delivery/${assetId}${query ? `?${query}` : ''}`;
@@ -519,22 +504,13 @@ export class MediaPlatformClient {
       metadata?: Record<string, any>;
       onProgress?: (progress: number) => void;
       signal?: AbortSignal;
-    } = {}
+    } = {},
+    requestOptions: RequestOptions = {}
   ): Promise<Asset> {
     const isBlob = fileOrBlob instanceof Blob || (typeof File !== 'undefined' && fileOrBlob instanceof File);
     const size = isBlob ? (fileOrBlob as Blob).size : (fileOrBlob as any).byteLength || (fileOrBlob as any).length;
     const filename = opts.filename || (fileOrBlob as any).name || opts.displayName || 'uploaded-file';
     const mimeType = opts.mimeType || (fileOrBlob as any).type || 'application/octet-stream';
-
-    // If size <= 4MB, direct multipart is supported
-    if (size <= 4 * 1024 * 1024) {
-      return this.uploadAsset(fileOrBlob, {
-        displayName: opts.displayName || filename,
-        folderId: opts.folderId,
-        visibility: opts.visibility,
-        metadata: opts.metadata,
-      }, { signal: opts.signal });
-    }
 
     // Direct Upload Session for large media (> 4MB)
     const sessionRes = await this.createDirectUploadSession({
@@ -545,7 +521,7 @@ export class MediaPlatformClient {
       displayName: opts.displayName,
       visibility: opts.visibility,
       metadata: opts.metadata,
-    }, { signal: opts.signal });
+    }, { ...requestOptions, idempotencyKey: undefined, skipRetry: true, signal: opts.signal });
 
     const capability = sessionRes.capability;
     const bodyData = isBlob ? fileOrBlob : new Blob([fileOrBlob as any], { type: mimeType });
@@ -566,7 +542,7 @@ export class MediaPlatformClient {
 
     if (opts.onProgress) opts.onProgress(100);
 
-    const completed = await this.completeDirectUploadSession(sessionRes.session.id, undefined, { signal: opts.signal });
+    const completed = await this.completeDirectUploadSession(sessionRes.session.id, undefined, { ...requestOptions, signal: opts.signal });
     return completed.asset;
   }
 

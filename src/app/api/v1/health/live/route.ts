@@ -1,3 +1,4 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextResponse } from 'next/server';
 import { healthService } from '@/lib/platform/healthService';
 
@@ -8,7 +9,7 @@ export const dynamic = 'force-dynamic';
  * Fast In-Memory Liveness Probe: Verifies API process is running.
  * Never executes external database or storage checks.
  */
-export async function GET() {
+async function handleGET() {
   const result = healthService.getLiveness();
   return NextResponse.json(result, {
     status: 200,
@@ -17,3 +18,5 @@ export async function GET() {
     },
   });
 }
+
+export const GET = withApiRoute(handleGET);

@@ -1,3 +1,4 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest } from '@/lib/security/auth-guard';
 import { workspaceService } from '@/services/workspaceService';
@@ -5,7 +6,7 @@ import { createSessionToken, SESSION_COOKIE_NAME, verifySessionToken } from '@/l
 import { AppError } from '@/lib/errors/app-error';
 import { ErrorCodes } from '@/lib/errors/codes';
 
-export async function POST(req: NextRequest) {
+async function handlePOST(req: NextRequest) {
   try {
     const sessionCookie = req.cookies.get(SESSION_COOKIE_NAME)?.value;
     const session = await verifySessionToken(sessionCookie);
@@ -102,3 +103,7 @@ export async function POST(req: NextRequest) {
     );
   }
 }
+
+export const dynamic = 'force-dynamic';
+
+export const POST = withApiRoute(handlePOST);

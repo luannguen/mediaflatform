@@ -1,3 +1,4 @@
+import { validateUploadLimits } from '@/lib/security/uploadPolicy';
 import { generateId } from '@/lib/ids/generator';
 import { isSupabaseAdminConfigured, supabaseAdmin } from '@/lib/supabase/admin';
 import { mockDb } from '@/lib/mock/store';
@@ -9,6 +10,7 @@ import { ErrorCodes } from '@/lib/errors/codes';
 import { Asset, ProcessingJob } from '@/types/database';
 
 export interface UploadSession {
+  reserved_asset_id?: string;
   id: string;
   workspace_id: string;
   folder_id?: string | null;
@@ -97,6 +99,9 @@ export const uploadSessionService = {
   }> {
     assertPersistentBackend('UploadSessionService.createSession');
     await assertFolderBelongsToWorkspace(input.folderId, input.workspaceId);
+    if (typeof input.filename !== 'string' || !input.filename || typeof input.mimeType !== 'string' || input.mimeType.length > 128 || input.filename.length > 255 || !['public','workspace','private'].includes(input.visibility || 'workspace')) throw AppError.badRequest('Invalid upload metadata');
+    const type = input.mimeType.startsWith('video/') ? 'video' : input.mimeType.startsWith('image/') ? 'image' : input.mimeType === 'application/pdf' ? 'document' : 'other';
+    validateUploadLimits(type, input.fileSizeBytes);
 
     const sessionId = generateId('sess');
     const sanitizedName = input.filename.replace(/[^a-zA-Z0-9.-]/g, '_');
@@ -106,13 +111,7 @@ export const uploadSessionService = {
     // v3.8.4.1 correctness gate: advertise only protocols implemented by every first-party client.
     // True TUS requires create-resource + PATCH/Upload-Offset support; until that client exists,
     // signed-put is the only production capability issued.
-    const capability = await storage.createDirectUploadSession({
-      key: storageKey,
-      mimeType: input.mimeType,
-      sizeBytes: input.fileSizeBytes,
-      expiresInSeconds: 3600,
-      preferProtocol: 'signed-put',
-    });
+    const makeCapability = (bucket?: string) => storage.createDirectUploadSession({ key: storageKey, mimeType: input.mimeType, sizeBytes: input.fileSizeBytes, bucket, preferProtocol: 'signed-put' });
 
     const now = new Date();
     const expiresAt = new Date(now.getTime() + 24 * 3600 * 1000).toISOString();
@@ -123,8 +122,8 @@ export const uploadSessionService = {
       id: sessionId,
       workspace_id: input.workspaceId,
       folder_id: input.folderId || null,
-      storage_provider: capability.storageProvider || storage.name,
-      storage_bucket: capability.storageBucket || process.env.SUPABASE_STORAGE_BUCKET || 'media-assets',
+      storage_provider: storage.name,
+      storage_bucket: process.env.SUPABASE_STORAGE_BUCKET || 'media-assets',
       storage_key: storageKey,
       filename: input.filename,
       display_name: input.displayName || input.filename.replace(/\.[^/.]+$/, ''),
@@ -136,8 +135,8 @@ export const uploadSessionService = {
       requested_by_type: requestedByType,
       requested_by_id: requestedById,
       metadata_json: {
-        ...(input.metadata || {}),
-        capability_protocol: capability.protocol,
+        custom: input.metadata || {},
+        capability_protocol: 'signed-put',
       },
       created_at: now.toISOString(),
     };
@@ -167,14 +166,15 @@ export const uploadSessionService = {
         .single();
 
       if (error) {
-        throw AppError.internal(`Failed to create upload session: ${error.message}`);
+        if (error.message.includes('QUOTA_EXCEEDED')) throw AppError.badRequest('Workspace quota exceeded', 'QUOTA_EXCEEDED');
+        throw AppError.serviceUnavailable('Could not reserve upload capacity');
       }
-      return { session: data as UploadSession, capability };
+      return { session: data as UploadSession, capability: await makeCapability(data.storage_bucket) };
     }
 
     (mockDb as any).upload_sessions = (mockDb as any).upload_sessions || [];
     (mockDb as any).upload_sessions.push(sessionData);
-    return { session: sessionData, capability };
+    return { session: sessionData, capability: await makeCapability() };
   },
 
   async getSessionById(sessionId: string): Promise<UploadSession | null> {
@@ -192,12 +192,13 @@ export const uploadSessionService = {
     return sessions.find((s: any) => s.id === sessionId) || null;
   },
 
-  async refreshCapability(sessionId: string, workspaceId: string): Promise<DirectUploadCapability> {
+  async refreshCapability(sessionId: string, workspaceId: string, callerUserId?: string, callerServiceAccountId?: string): Promise<DirectUploadCapability> {
     const session = await this.getSessionById(sessionId);
     if (!session) throw AppError.notFound('Upload session not found', ErrorCodes.NOT_FOUND);
     if (session.workspace_id !== workspaceId) {
       throw AppError.forbidden('Forbidden: session belongs to another workspace', ErrorCodes.FORBIDDEN);
     }
+    if (session.requested_by_id !== (callerServiceAccountId || callerUserId) || session.requested_by_type !== (callerServiceAccountId ? 'service_account' : 'user')) throw AppError.forbidden('Only the initiating identity can refresh this upload');
     if (new Date(session.expires_at).getTime() <= Date.now()) {
       throw AppError.badRequest('Upload session has expired', ErrorCodes.UPLOAD_SESSION_EXPIRED);
     }
@@ -237,6 +238,7 @@ export const uploadSessionService = {
     clientChecksum?: string | null;
   }): Promise<FinalizeSessionResult> {
     assertPersistentBackend('UploadSessionService.completeSession');
+    if (params.clientChecksum && !/^[a-fA-F0-9]{64}$/.test(params.clientChecksum)) throw AppError.badRequest('Checksum must be a SHA-256 hexadecimal digest');
 
     const session = await this.getSessionById(params.sessionId);
     if (!session) throw AppError.notFound('Upload session not found', ErrorCodes.NOT_FOUND);
@@ -244,6 +246,7 @@ export const uploadSessionService = {
       throw AppError.forbidden('Forbidden: session belongs to another workspace', ErrorCodes.FORBIDDEN);
     }
 
+    if (session.requested_by_id !== (params.callerServiceAccountId || params.callerUserId) || session.requested_by_type !== (params.callerServiceAccountId ? 'service_account' : 'user')) throw AppError.forbidden('Only the initiating identity can complete this upload');
     if (session.status === 'completed' && session.asset_id && isSupabaseAdminConfigured()) {
       const { data: existingAsset } = await supabaseAdmin
         .from('assets')
@@ -315,8 +318,8 @@ export const uploadSessionService = {
           p_caller_user_id: params.callerUserId || null,
           p_caller_service_account_id: params.callerServiceAccountId || null,
           p_actual_size_bytes: metadata.sizeBytes,
-          p_declared_checksum: null,
-          p_content_type: metadata.contentType || session.mime_type,
+          p_declared_checksum: params.clientChecksum || null,
+          p_content_type: session.mime_type,
         }
       );
 
@@ -365,14 +368,16 @@ export const uploadSessionService = {
   async cleanupExpiredSessions(): Promise<{ cleanedCount: number }> {
     if (!isSupabaseAdminConfigured()) return { cleanedCount: 0 };
 
-    const now = new Date().toISOString();
+    // Signed PUT capabilities remain usable for two hours, including refreshes just before expiry.
+    const cleanupBefore = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
     const storage = getStorageProvider();
     const { data: expiredSessions, error } = await supabaseAdmin
       .from('upload_sessions')
       .select('id, storage_key, storage_bucket, asset_id')
-      .in('status', ['created', 'uploading', 'uploaded', 'verifying', 'expired', 'expired_pending_cleanup'])
-      .lt('expires_at', now)
+      .in('status', ['created', 'uploading', 'uploaded', 'verifying', 'expired_pending_cleanup'])
+      .lt('expires_at', cleanupBefore)
       .is('asset_id', null)
+      .order('expires_at', { ascending: true })
       .limit(50);
 
     if (error || !expiredSessions || expiredSessions.length === 0) return { cleanedCount: 0 };
@@ -384,7 +389,7 @@ export const uploadSessionService = {
         .update({ status: 'expired_pending_cleanup' })
         .eq('id', sess.id)
         .is('asset_id', null)
-        .in('status', ['created', 'uploading', 'uploaded', 'verifying', 'expired', 'expired_pending_cleanup'])
+        .in('status', ['created', 'uploading', 'uploaded', 'verifying', 'expired_pending_cleanup'])
         .select('id')
         .maybeSingle();
 

@@ -1,10 +1,12 @@
+import { AppError } from '@/lib/errors/app-error';
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest } from 'next/server';
 import { assetService } from '@/services/assetService';
 import { authenticateRequest } from '@/lib/security/auth-guard';
 import { successResponse, errorResponse } from '@/lib/errors/response';
 import { AssetType, AssetStatus } from '@/types/database';
 
-export async function GET(req: NextRequest) {
+async function handleGET(req: NextRequest) {
   try {
     const principal = await authenticateRequest(req, 'assets:read');
     const { searchParams } = new URL(req.url);
@@ -60,26 +62,17 @@ export async function GET(req: NextRequest) {
   }
 }
 
-export async function POST(req: NextRequest) {
+async function handlePOST(req: NextRequest) {
   try {
     const principal = await authenticateRequest(req, 'assets:write');
-    const body = await req.json();
-
-    const asset = await assetService.createAsset({
-      ...body,
-      originalFilename: body.original_filename || body.originalFilename || 'unnamed.bin',
-      displayName: body.display_name || body.displayName,
-      assetType: body.asset_type || body.assetType,
-      mimeType: body.mime_type || body.mimeType || 'application/octet-stream',
-      sizeBytes: typeof body.size_bytes === 'number' ? body.size_bytes : (body.sizeBytes || 0),
-      storageKey: body.storage_key || body.storageKey || `manual/${Date.now()}`,
-      storageUrl: body.storage_url || body.storageUrl,
-      workspaceId: principal.workspaceId,
-      createdByServiceAccountId: principal.serviceAccountId,
-    });
-
-    return successResponse(asset, {}, 201);
+    throw AppError.badRequest('Create assets through upload sessions so content and storage ownership can be verified');
   } catch (error) {
     return errorResponse(error);
   }
 }
+
+export const dynamic = 'force-dynamic';
+
+export const GET = withApiRoute(handleGET, 'assets:read');
+
+export const POST = withApiRoute(handlePOST, 'assets:write');

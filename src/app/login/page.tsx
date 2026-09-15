@@ -1,50 +1,46 @@
 'use client';
+import { safeRedirect } from '@/lib/auth/redirect';
 
-import { Suspense, useState, useEffect } from 'react';
+
+import { Suspense, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { HardDrive, ShieldCheck, ArrowRight, Lock, Mail, User, Sparkles, Building2, UserPlus, LogIn } from 'lucide-react';
-import { DEMO_USERS } from '@/lib/auth/session';
 import { toast } from 'sonner';
 
 function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const redirectUrl = searchParams.get('redirect') || '/';
+  const redirectUrl = safeRedirect(searchParams.get('redirect'));
 
+  const [workspaceOptions, setWorkspaceOptions] = useState<{id: string; name: string}[]>([]);
+  const [workspaceId, setWorkspaceId] = useState('');
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [workspaceName, setWorkspaceName] = useState('');
   const [loading, setLoading] = useState(false);
-  const [activeRoleKey, setActiveRoleKey] = useState<string | null>(null);
-  const [isLocalHost, setIsLocalHost] = useState(false);
-
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const hostname = window.location.hostname;
-      setIsLocalHost(hostname === 'localhost' || hostname === '127.0.0.1');
-    }
-  }, []);
-
-  const handleLogin = async (e?: React.FormEvent, roleKey?: string) => {
+  const handleLogin = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setLoading(true);
-    if (roleKey) setActiveRoleKey(roleKey);
 
     try {
       const res = await fetch('/api/v1/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password, roleKey }),
+        body: JSON.stringify({ email, password, workspaceId: workspaceId || undefined }),
       });
 
       const json = await res.json();
 
+      if (json.error?.code === 'WORKSPACE_SELECTION_REQUIRED') {
+        setWorkspaceOptions(json.error.details.workspaces);
+        setLoading(false);
+        return;
+      }
       if (!res.ok) {
         toast.error(json.error?.message || 'Login failed');
         setLoading(false);
-        setActiveRoleKey(null);
         return;
       }
 
@@ -54,7 +50,6 @@ function LoginForm() {
     } catch {
       toast.error('Network error during login');
       setLoading(false);
-      setActiveRoleKey(null);
     }
   };
 
@@ -68,8 +63,8 @@ function LoginForm() {
       toast.error('Please enter a valid email address');
       return;
     }
-    if (password.length < 8) {
-      toast.error('Password must be at least 8 characters long');
+    if (password.length < 12) {
+      toast.error('Password must be at least 12 characters long');
       return;
     }
 
@@ -94,6 +89,7 @@ function LoginForm() {
         return;
       }
 
+      if (json.data.requires_confirmation) { toast.success(json.data.message); setMode('login'); setLoading(false); return; }
       toast.success(`Account created! Welcome to ${json.data.workspace.name}`);
       router.push(redirectUrl);
       router.refresh();
@@ -157,6 +153,7 @@ function LoginForm() {
           {mode === 'login' ? (
             /* ================= Sign In Form ================= */
             <form className="space-y-4" onSubmit={(e) => handleLogin(e)}>
+              {workspaceOptions.length > 0 && <label className="block text-sm">Choose workspace<select required aria-label="Workspace" className="block w-full bg-slate-950 p-3" value={workspaceId} onChange={e => setWorkspaceId(e.target.value)}><option value="">Select a workspace</option>{workspaceOptions.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select></label>}
               <div>
                 <div className="mb-1.5">
                   <label className="block text-xs font-medium text-slate-300">
@@ -167,6 +164,7 @@ function LoginForm() {
                   <Mail className="h-4 w-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
                     type="email"
+                    autoComplete="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="name@example.com"
@@ -184,6 +182,7 @@ function LoginForm() {
                   <Lock className="h-4 w-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
                     type="password"
+                    autoComplete="current-password"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="••••••••••••"
@@ -198,7 +197,7 @@ function LoginForm() {
                 disabled={loading || (!email && !password)}
                 className="w-full mt-2 flex items-center justify-center gap-2 py-3 px-4 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-sm font-semibold shadow-lg shadow-violet-600/25 transition disabled:opacity-50 min-h-[44px]"
               >
-                {loading && !activeRoleKey ? (
+                {loading ? (
                   <span>Signing in...</span>
                 ) : (
                   <>
@@ -236,6 +235,7 @@ function LoginForm() {
                   <Mail className="h-4 w-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
                     type="email"
+                    autoComplete="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="john@company.com"
@@ -257,7 +257,7 @@ function LoginForm() {
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="••••••••••••"
                     required
-                    minLength={8}
+                    minLength={12}
                     className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-3 py-2.5 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-violet-500 focus:ring-1 focus:ring-violet-500 transition min-h-[44px]"
                   />
                 </div>
@@ -300,56 +300,6 @@ function LoginForm() {
                 )}
               </button>
             </form>
-          )}
-
-          {/* Quick Access Demo Identities: RESTRICTED TO LOCALHOST ONLY (Zero-Trust Guard) */}
-          {isLocalHost && mode === 'login' && (
-            <div className="mt-8 pt-6 border-t border-slate-800">
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                  ⚡ Quick Sign-in by Role (Localhost 3000 Only)
-                </span>
-                <span className="text-[10px] text-amber-400 bg-amber-950/40 border border-amber-500/20 px-2 py-0.5 rounded-full font-mono">
-                  DEV MODE ONLY
-                </span>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                {Object.entries(DEMO_USERS).map(([key, item]) => {
-                  const isLoadingThis = loading && activeRoleKey === key;
-                  return (
-                    <button
-                      key={key}
-                      type="button"
-                      onClick={() => handleLogin(undefined, key)}
-                      disabled={loading}
-                      className="flex flex-col text-left p-3 rounded-xl border border-slate-800 bg-slate-950/60 hover:bg-slate-800/80 hover:border-violet-500/30 transition group min-h-[44px]"
-                    >
-                      <div className="flex items-center justify-between w-full mb-1">
-                        <span className="text-xs font-semibold text-slate-200 group-hover:text-violet-300 capitalize flex items-center gap-1.5">
-                          {key === 'admin' && '👑'}
-                          {key === 'editor' && '✍️'}
-                          {key === 'viewer' && '👁️'}
-                          {key === 'developer' && '💻'}
-                          {key}
-                        </span>
-                        <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 group-hover:bg-violet-600/20 group-hover:text-violet-400">
-                          {key}
-                        </span>
-                      </div>
-                      <p className="text-[11px] text-slate-400 line-clamp-2 leading-relaxed">
-                        {item.description}
-                      </p>
-                      {isLoadingThis && (
-                        <span className="mt-2 text-[10px] text-violet-400 font-medium animate-pulse">
-                          Authenticating...
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
           )}
 
           <div className="mt-6 pt-4 border-t border-slate-800/60 flex items-center justify-between text-[11px] text-slate-400">

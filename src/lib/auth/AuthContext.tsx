@@ -49,9 +49,8 @@ interface AuthContextType {
   loading: boolean;
   can: (action: PermissionAction) => boolean;
   login: (email?: string, password?: string, roleKey?: string) => Promise<boolean>;
-  register: (payload: RegisterPayload) => Promise<{ success: boolean; error?: string }>;
+  register: (payload: RegisterPayload) => Promise<{ success: boolean; requiresConfirmation?: boolean; error?: string }>;
   logout: () => Promise<void>;
-  switchRole: (roleKey: string) => Promise<void>;
   switchWorkspace: (workspaceId: string) => Promise<boolean>;
   createWorkspace: (name: string, description?: string) => Promise<boolean>;
   acceptInvitation: (invitationId: string) => Promise<boolean>;
@@ -212,7 +211,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  const register = async (payload: RegisterPayload): Promise<{ success: boolean; error?: string }> => {
+  const register = async (payload: RegisterPayload): Promise<{ success: boolean; requiresConfirmation?: boolean; error?: string }> => {
     try {
       const res = await fetch('/api/v1/auth/register', {
         method: 'POST',
@@ -225,6 +224,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return { success: false, error: json.error?.message || 'Registration failed' };
       }
 
+      if (json.data.requires_confirmation) return { success: true, requiresConfirmation: true };
       setUser(json.data.user);
       setWorkspace(json.data.workspace);
       await Promise.all([fetchWorkspaces(), fetchInvitations()]);
@@ -243,13 +243,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setWorkspaces([]);
       setPendingInvitations([]);
       router.push('/login');
-      router.refresh();
-    }
-  };
-
-  const switchRole = async (roleKey: string) => {
-    const success = await login(undefined, undefined, roleKey);
-    if (success) {
       router.refresh();
     }
   };
@@ -365,7 +358,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         login,
         register,
         logout,
-        switchRole,
         switchWorkspace,
         createWorkspace,
         acceptInvitation,

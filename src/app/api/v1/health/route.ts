@@ -1,3 +1,4 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextResponse } from 'next/server';
 import { healthService } from '@/lib/platform/healthService';
 
@@ -7,7 +8,7 @@ export const dynamic = 'force-dynamic';
  * GET /api/v1/health
  * Backward-compatible health alias mapping to readiness check.
  */
-export async function GET() {
+async function handleGET() {
   const { isReady, result } = await healthService.getReadiness();
 
   return NextResponse.json(
@@ -29,3 +30,5 @@ export async function GET() {
     }
   );
 }
+
+export const GET = withApiRoute(handleGET);

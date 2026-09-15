@@ -514,6 +514,15 @@ export const developerService = {
       );
     }
 
+    if (isSupabaseAdminConfigured()) {
+      const { data: account, error: accountError } = await supabaseAdmin.from('service_accounts').select('id,application_id').eq('id',matchedKey.service_account_id).eq('workspace_id',matchedKey.workspace_id).eq('status','active').maybeSingle();
+      const { data: workspace, error: workspaceError } = await supabaseAdmin.from('workspaces').select('id').eq('id',matchedKey.workspace_id).eq('status','active').maybeSingle();
+      if (accountError || workspaceError) throw AppError.serviceUnavailable('API key identity validation unavailable');
+      if (!account || !workspace) throw AppError.unauthorized('API key identity is disabled');
+      const { data: app, error: appError } = await supabaseAdmin.from('applications').select('id').eq('id',account.application_id).eq('workspace_id',matchedKey.workspace_id).eq('status','active').maybeSingle();
+      if (appError) throw AppError.serviceUnavailable('Application identity validation unavailable');
+      if (!app) throw AppError.unauthorized('API key application is disabled');
+    }
     // Async update last_used_at without blocking
     if (isSupabaseAdminConfigured()) {
       supabaseAdmin

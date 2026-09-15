@@ -1,8 +1,10 @@
+import { errorResponse } from '@/lib/errors/response';
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest, NextResponse } from 'next/server';
 import { SESSION_COOKIE_NAME, verifySessionToken, createSessionToken } from '@/lib/auth/session';
 import { resolveAuthorizedWorkspace } from '@/lib/security/workspace-resolver';
 
-export async function GET(req: NextRequest) {
+async function handleGET(req: NextRequest) {
   try {
     const token = req.cookies.get(SESSION_COOKIE_NAME)?.value;
     const session = await verifySessionToken(token);
@@ -80,16 +82,11 @@ export async function GET(req: NextRequest) {
     }
 
     return response;
-  } catch (err: any) {
-    const status = err.statusCode || (err.code === 'WORKSPACE_ACCESS_DENIED' ? 403 : 500);
-    return NextResponse.json(
-      {
-        error: {
-          code: err.code || 'INTERNAL_ERROR',
-          message: err.message || 'Failed to fetch user session profile',
-        },
-      },
-      { status }
-    );
+  } catch (error) {
+    return errorResponse(error);
   }
 }
+
+export const dynamic = 'force-dynamic';
+
+export const GET = withApiRoute(handleGET);

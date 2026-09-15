@@ -1,3 +1,5 @@
+import { hasScope } from '@/lib/security/api-key';
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest } from 'next/server';
 import { authenticateRequest } from '@/lib/security/auth-guard';
 import { uploadSessionService } from '@/services/uploadSessionService';
@@ -17,7 +19,7 @@ function detectAssetType(mimeType: string, filename: string): AssetType {
   return 'other';
 }
 
-export async function POST(req: NextRequest) {
+async function handlePOST(req: NextRequest) {
   try {
     const principal = await authenticateRequest(req, 'uploads:create');
 
@@ -48,6 +50,8 @@ export async function POST(req: NextRequest) {
       throw AppError.badRequest('Invalid "visibility". Allowed values: public, workspace, private', ErrorCodes.VALIDATION_ERROR);
     }
 
+    if (visibility === 'public' && !hasScope(principal.scopes, 'assets:visibility:write')) throw AppError.forbidden('Public upload requires visibility permission');
+    if (typeof mimeType !== 'string') throw AppError.badRequest('Invalid MIME type');
     // Validate size limits and workspace quota
     const assetType = detectAssetType(mimeType, filename);
     validateUploadLimits(assetType, fileSizeBytes);
@@ -84,3 +88,7 @@ export async function POST(req: NextRequest) {
     return errorResponse(error);
   }
 }
+
+export const dynamic = 'force-dynamic';
+
+export const POST = withApiRoute(handlePOST, 'uploads:create');

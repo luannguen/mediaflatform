@@ -1,3 +1,4 @@
+import { hasScope } from './api-key';
 import { AuthPrincipal } from './auth-guard';
 import { Asset, Visibility } from '@/types/database';
 import { ErrorCode, ErrorCodes } from '@/lib/errors/codes';
@@ -46,6 +47,9 @@ export function authorize(
       message: 'Forbidden: Cross-workspace access denied',
     };
   }
+
+  const scopes: Record<AssetAction, string> = { 'asset.read': 'assets:read', 'asset.update': 'assets:write', 'asset.delete': 'assets:delete', 'asset.purge': 'assets:purge', 'asset.change_visibility': 'assets:visibility:write' };
+  if (!hasScope(principal.scopes, scopes[action])) return { allowed: false, code: ErrorCodes.PERMISSION_DENIED, message: 'Required asset scope is missing' };
 
   // 3. Action-Specific Role Governance
   if (action === 'asset.change_visibility') {

@@ -1,3 +1,4 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest } from 'next/server';
 import { authenticateRequest } from '@/lib/security/auth-guard';
 import { developerService } from '@/services/developerService';
@@ -10,7 +11,7 @@ export const dynamic = 'force-dynamic';
  * GET /api/v1/developer/logs
  * Query API Request Logs for the authenticated workspace with redaction and filtering.
  */
-export async function GET(req: NextRequest) {
+async function handleGET(req: NextRequest) {
   const requestId = extractRequestId(req);
   try {
     const principal = await authenticateRequest(req, 'audit:read');
@@ -44,3 +45,5 @@ export async function GET(req: NextRequest) {
     return errorResponse(error, requestId);
   }
 }
+
+export const GET = withApiRoute(handleGET, 'audit:read');

@@ -16,6 +16,11 @@ export function inspectSvgSafety(svgContent: string): SvgInspectionResult {
 
   // Dangerous vectors
   const dangerousPatterns = [
+    /<!DOCTYPE|<!ENTITY|<\?xml-stylesheet/i,
+    /\bon[a-z]+\s*=/i,
+    /(?:href|src)\s*=\s*["'](?!#)/i,
+    /url\s*\(|@import|<style|<animate|<set[\s>]/i,
+    /&#|&[a-z]+;/i,
     /<script/i,
     /javascript:/i,
     /<foreignobject/i,

@@ -349,11 +349,7 @@ export const workspaceService = {
    */
   async getWorkspaceMembers(workspaceId: string): Promise<WorkspaceMembership[]> {
     if (isPersistentMode() && isSupabaseAdminConfigured()) {
-      const { data, error } = await supabaseAdmin
-        .from('workspace_memberships')
-        .select('*')
-        .eq('workspace_id', workspaceId)
-        .eq('status', 'active');
+      const { data, error } = await supabaseAdmin.rpc('workspace_member_directory', { p_workspace: workspaceId });
 
       if (error) {
         throw AppError.internal(`Failed to load workspace members: ${error.message}`, ErrorCodes.INTERNAL_ERROR);

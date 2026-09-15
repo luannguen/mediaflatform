@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.8.5] - 2026-09-14
+
+### Fixed
+- Verified Supabase identities, tenant scope checks and explicit test-only mocks; removed environment admin login and role simulation.
+- Enabled RLS/revoked public database access and made Storage private; protected media is delivered through the gateway.
+- Shared API request controls, CSRF checks, durable idempotency fencing and tenant-aware request logs.
+- Persistent invitations and atomic acceptance; current member names/emails come from verified Auth identities.
+- Unified upload sessions for dashboard, SDK, multipart compatibility routes and CMS connectors. Worker validates bytes/SHA-256 before lease-fenced publication.
+- Real PDF first-page rendering, shared worker pipelines, and explicit FFmpeg failures without synthetic output.
+- Atomic restore, reference-aware purge with recursive pagination and recoverable storage failures, and scheduled expired-session cleanup.
+- Transactional webhook outbox, scoped deliveries, bounded retries and DNS-pinned public HTTPS transport.
+- Full-window database analytics, SDK pagination and safe mutation retry behavior.
+- Mobile dashboard navigation and accessible action labels.
+
+### Build and operations
+- Added checksum-ledger SQL migrations, database/HTTP/media regression suites, SDK CJS/ESM/declaration build, dependency audit and CI.
+- Node 22.13+ required; Sharp/PDF.js/native canvas are explicit runtime dependencies. Patched nested PostCSS dependency.
+- See [production runbook](docs/operations/PRODUCTION.md) for private-bucket URL migration, incomplete legacy uploads, credential replay restrictions and old-worker incompatibility.
+- Detailed verification and deployment limits: [release evidence](docs/PRODUCTION-UPDATE.md).
+
 ## [3.8.3] - 2026-09-10
 
 ### Fixed & Hardened (Workspace Persistence & Production Identity Integrity)

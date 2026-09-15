@@ -1,10 +1,11 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest } from 'next/server';
 import { assetService } from '@/services/assetService';
 import { authenticateRequest } from '@/lib/security/auth-guard';
 import { successResponse, errorResponse } from '@/lib/errors/response';
 import { AppError } from '@/lib/errors/app-error';
 
-export async function PATCH(
+async function handlePATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -51,3 +52,7 @@ export async function PATCH(
     return errorResponse(error);
   }
 }
+
+export const dynamic = 'force-dynamic';
+
+export const PATCH = withApiRoute(handlePATCH, 'assets:write');

@@ -1,3 +1,4 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest, NextResponse } from 'next/server';
 import { assetService } from '@/services/assetService';
 import { analyticsService } from '@/services/analyticsService';
@@ -14,7 +15,7 @@ import {
 import sharp from 'sharp';
 import crypto from 'crypto';
 
-export async function GET(
+async function handleGET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -135,6 +136,7 @@ export async function GET(
       }
     }
 
+    if (asset.status !== 'active' || !['ready','skipped'].includes(asset.processing_status)) return NextResponse.json({ error: 'ASSET_NOT_READY' }, { status: 425, headers: { 'Cache-Control': 'private, no-store', 'Retry-After': '5' } });
     const widthParam = searchParams.get('w') || searchParams.get('width');
     const heightParam = searchParams.get('h') || searchParams.get('height');
     const qualityParam = searchParams.get('q') || searchParams.get('quality');
@@ -249,7 +251,7 @@ export async function GET(
     }
 
     // 6. SVG Vector Delivery
-    if (asset.mime_type === 'image/svg+xml') {
+    if (asset.mime_type === 'image/svg+xml' && searchParams.get('download') === 'true') {
       const svgBuf = await storage.download(asset.storage_key);
       if (svgBuf && svgBuf.length > 0) {
         const policy = getDeliveryPolicy(asset, {
@@ -268,7 +270,7 @@ export async function GET(
 
     // 7. Check Canonical Variant Pre-rendered Cache (NO UPSCALING)
     const canonicalMatch = findCanonicalVariantMatch(width, height, formatParam);
-    if (canonicalMatch && !hasWatermark && rawFit === 'cover') {
+    if (canonicalMatch && !hasWatermark && !isFocalCrop && !isSmartCrop && quality === 80 && rawFit === 'cover') {
       const canonicalKey = `images/${asset.id}/${sourceVersion}/${canonicalMatch}.webp`;
       try {
         const variantBuf = await storage.download(canonicalKey);
@@ -294,9 +296,11 @@ export async function GET(
       height,
       format: (['webp', 'avif', 'jpeg', 'png'].includes(formatParam) ? formatParam : 'webp') as any,
       quality,
-      fit: fitParam,
+      fit: isSmartCrop ? 'smart' : isFocalCrop ? 'focal' : fitParam,
       focalX: isFocalCrop ? focalX : undefined,
       focalY: isFocalCrop ? focalY : undefined,
+      watermark_pos: watermarkPos,
+      watermark_opacity: watermarkOpacity,
       watermark: (hasWatermark && watermarkText) ? watermarkText : undefined,
     });
 
@@ -320,25 +324,7 @@ export async function GET(
     // 9. Fetch source image for transformation
     let inputBuffer: Buffer | null = await storage.download(asset.storage_key);
 
-    if (!inputBuffer || inputBuffer.length === 0) {
-      if (asset.storage_url && asset.storage_url.startsWith('data:')) {
-        const base64Part = asset.storage_url.split(',')[1];
-        inputBuffer = Buffer.from(base64Part, 'base64');
-      } else if (asset.storage_url) {
-        try {
-          const sourceRes = await fetch(asset.storage_url);
-          if (sourceRes.ok) {
-            inputBuffer = Buffer.from(await sourceRes.arrayBuffer());
-          }
-        } catch {}
-      }
-    }
-
-    if (!inputBuffer || inputBuffer.length === 0) {
-      const safeName = asset.display_name.replace(/&/g, '&amp;');
-      const fallbackSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width || 600}" height="${height || 400}"><rect width="100%" height="100%" fill="#0f172a"/><text x="50%" y="50%" fill="#64748b" font-family="system-ui" font-size="18" font-weight="bold" text-anchor="middle">${safeName}</text></svg>`;
-      inputBuffer = Buffer.from(fallbackSvg);
-    }
+    if (!inputBuffer?.length) return new NextResponse('Source unavailable', { status: 503, headers: { 'Cache-Control': 'private, no-store' } });
 
     // 10. Sharp Pipeline Execution
     let pipeline = sharp(inputBuffer).rotate(); // auto-orient based on EXIF
@@ -486,3 +472,7 @@ export async function GET(
     return new NextResponse(`Image transformation error: ${error.message}`, { status: 500 });
   }
 }
+
+export const dynamic = 'force-dynamic';
+
+export const GET = withApiRoute(handleGET, 'assets:read');

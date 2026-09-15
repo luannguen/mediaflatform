@@ -148,39 +148,54 @@ class MediaPlatformConnector {
             return $upload;
         }
 
-        $url = $opts['api_endpoint'] . '/api/v1/uploads/direct';
-        $boundary = wp_generate_password(24);
-        $headers = [
-            'content-type' => 'multipart/form-data; boundary=' . $boundary,
-        ];
-        if (!empty($opts['api_key'])) {
-            $headers['Authorization'] = 'Bearer ' . $opts['api_key'];
+        if (empty($opts['api_key']) || !function_exists('curl_init')) {
+            $upload['error'] = 'Media Platform requires an API key and the PHP cURL extension.';
+            return $upload;
         }
-
-        $file_contents = file_get_contents($file_path);
-        $filename = basename($file_path);
-
-        $payload = '';
-        $payload .= '--' . $boundary . "\r\n";
-        $payload .= 'Content-Disposition: form-data; name="file"; filename="' . $filename . '"' . "\r\n";
-        $payload .= 'Content-Type: ' . $file_type . "\r\n\r\n";
-        $payload .= $file_contents . "\r\n";
-        $payload .= '--' . $boundary . '--' . "\r\n";
-
-        $response = wp_remote_post($url, [
-            'headers' => $headers,
-            'body'    => $payload,
-            'timeout' => 45,
+        $base = rtrim($opts['api_endpoint'], '/');
+        $headers = ['Content-Type' => 'application/json', 'X-Media-Api-Key' => $opts['api_key']];
+        $response = wp_remote_post($base . '/api/v1/uploads/sessions', [
+            'headers' => $headers, 'timeout' => 30,
+            'body' => wp_json_encode(['filename' => basename($file_path), 'file_size' => filesize($file_path), 'mime_type' => $file_type, 'visibility' => 'public']),
         ]);
-
-        if (!is_wp_error($response) && wp_remote_retrieve_response_code($response) === 201) {
-            $body = json_decode(wp_remote_retrieve_body($response), true);
-            if (!empty($body['data']['id'])) {
-                $upload['mp_asset_id'] = $body['data']['id'];
-                // Save meta temporarily in session/transient for attachment creation
-                set_transient('mp_temp_asset_' . md5($file_path), $body['data']['id'], 300);
-            }
+        if (is_wp_error($response) || wp_remote_retrieve_response_code($response) !== 201) {
+            $upload['error'] = 'Media Platform could not reserve upload capacity.';
+            return $upload;
         }
+        $created = json_decode(wp_remote_retrieve_body($response), true)['data'] ?? [];
+        $capability = $created['capability'] ?? [];
+        $session_id = $created['session']['id'] ?? '';
+        if (!$session_id || empty($capability['uploadUrl']) || wp_parse_url($capability['uploadUrl'], PHP_URL_SCHEME) !== 'https') {
+            $upload['error'] = 'Media Platform returned an invalid upload capability.';
+            return $upload;
+        }
+        $handle = fopen($file_path, 'rb');
+        if ($handle === false) { $upload['error'] = 'Media Platform could not read the local file.'; return $upload; }
+        $curl = curl_init($capability['uploadUrl']);
+        curl_setopt_array($curl, [CURLOPT_UPLOAD => true, CURLOPT_INFILE => $handle,
+            CURLOPT_INFILESIZE => filesize($file_path), CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => false, CURLOPT_TIMEOUT => 300, CURLOPT_CONNECTTIMEOUT => 15,
+            CURLOPT_HTTPHEADER => ['Content-Type: ' . $file_type], CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
+        ]);
+        $sent = curl_exec($curl);
+        $status = curl_getinfo($curl, CURLINFO_HTTP_CODE);
+        curl_close($curl); fclose($handle);
+        if ($sent === false || $status < 200 || $status >= 300) {
+            $upload['error'] = 'Media Platform storage upload failed; the local file was retained.';
+            return $upload;
+        }
+        $response = wp_remote_post($base . '/api/v1/uploads/sessions/' . rawurlencode($session_id) . '/complete', [
+            'headers' => $headers, 'timeout' => 30, 'body' => '{}',
+        ]);
+        if (is_wp_error($response) || wp_remote_retrieve_response_code($response) >= 300) {
+            $upload['error'] = 'Media Platform could not finalize the upload; the local file was retained.';
+            return $upload;
+        }
+        $body = json_decode(wp_remote_retrieve_body($response), true);
+        $asset_id = $body['data']['asset']['id'] ?? '';
+        if (!$asset_id) { $upload['error'] = 'Media Platform returned no asset ID.'; return $upload; }
+        $upload['mp_asset_id'] = $asset_id;
+        set_transient('mp_temp_asset_' . md5($file_path), $asset_id, 300);
 
         return $upload;
     }

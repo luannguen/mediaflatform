@@ -13,7 +13,7 @@ export const TYPE_MAX_BYTES: Record<AssetType, number> = {
 
 export function validateUploadLimits(assetType: AssetType, sizeBytes: number): void {
   const maxAllowed = TYPE_MAX_BYTES[assetType] || TYPE_MAX_BYTES.other;
-  if (sizeBytes > maxAllowed) {
+  if (!Number.isSafeInteger(sizeBytes) || sizeBytes <= 0 || sizeBytes > maxAllowed) {
     const maxMb = Math.round(maxAllowed / (1024 * 1024));
     throw AppError.badRequest(
       `File size (${(sizeBytes / (1024 * 1024)).toFixed(1)}MB) exceeds maximum limit of ${maxMb}MB for type ${assetType}`,

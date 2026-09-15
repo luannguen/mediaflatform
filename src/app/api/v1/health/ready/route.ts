@@ -1,3 +1,4 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextResponse } from 'next/server';
 import { healthService } from '@/lib/platform/healthService';
 
@@ -8,7 +9,7 @@ export const dynamic = 'force-dynamic';
  * Readiness Probe: Verifies critical infrastructure dependencies (PostgreSQL, Storage).
  * Returns HTTP 503 if any critical dependency is unavailable.
  */
-export async function GET() {
+async function handleGET() {
   const { isReady, result } = await healthService.getReadiness();
 
   return NextResponse.json(result, {
@@ -18,3 +19,5 @@ export async function GET() {
     },
   });
 }
+
+export const GET = withApiRoute(handleGET);

@@ -1,3 +1,4 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextResponse } from 'next/server';
 import { PLATFORM_VERSION, API_VERSION, BUILD_DATE } from '@/lib/platform/version';
 
@@ -7,7 +8,7 @@ export const dynamic = 'force-dynamic';
  * GET /api/v1/capabilities
  * Machine-readable platform capabilities discovery endpoint.
  */
-export async function GET() {
+async function handleGET() {
   const capabilities = {
     api_version: API_VERSION,
     platform_version: PLATFORM_VERSION,
@@ -34,7 +35,7 @@ export async function GET() {
       },
       document: {
         enabled: true,
-        engine: 'pdf-lib',
+        engine: 'pdfjs-dist',
         input_formats: ['application/pdf'],
         features: ['binary_validation', 'page_count_extraction', 'first_page_thumbnail_webp'],
       },
@@ -60,7 +61,7 @@ export async function GET() {
     limits: {
       max_upload_size_bytes: 524288000,
       rate_limit_window_seconds: 60,
-      presigned_url_expiration_seconds: 3600,
+      presigned_url_expiration_seconds: 7200,
     },
   };
 
@@ -72,3 +73,5 @@ export async function GET() {
     }
   );
 }
+
+export const GET = withApiRoute(handleGET);

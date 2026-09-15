@@ -178,7 +178,7 @@ export const jobQueueService = {
 
       if (error) {
         console.warn('[JobQueue] RPC claim error, falling back to atomic query:', error.message);
-        return await this.fallbackAtomicClaim(workerId, leaseSeconds, runId);
+        throw AppError.serviceUnavailable('Atomic job claim unavailable');
       }
 
       if (Array.isArray(data) && data.length > 0) {
@@ -456,51 +456,7 @@ export const jobQueueService = {
       return freshJob as ProcessingJob;
     }
 
-    // Unfenced fallback only when no leaseContext is provided (e.g. administrative force completion)
-    const { data: job, error } = await supabaseAdmin
-      .from('processing_jobs')
-      .update({
-        status: 'completed',
-        current_stage: 'ready',
-        progress: 100,
-        output_version: version,
-        completed_at: now,
-        heartbeat_at: now,
-        lease_expires_at: null,
-        updated_at: now,
-        metadata_json: { output_manifest: outputManifest },
-      })
-      .eq('id', jobId)
-      .eq('status', 'processing')
-      .select()
-      .maybeSingle();
-
-    if (error || !job) {
-      throw AppError.internal(`Failed to complete job: ${error?.message || 'Job not in processing state'}`);
-    }
-
-    const { data: existingAsset } = await supabaseAdmin
-      .from('assets')
-      .select('metadata_json')
-      .eq('id', job.asset_id)
-      .maybeSingle();
-
-    const mergedMetadata = {
-      ...(existingAsset?.metadata_json || {}),
-      hls: outputManifest,
-      active_output_version: version,
-    };
-
-    await supabaseAdmin
-      .from('assets')
-      .update({
-        processing_status: 'ready',
-        metadata_json: mergedMetadata,
-        updated_at: now,
-      })
-      .eq('id', job.asset_id);
-
-    return job as ProcessingJob;
+    throw new LeaseLostError('LEASE_LOST: Worker and run identity are required for publication');
   },
 
   /**

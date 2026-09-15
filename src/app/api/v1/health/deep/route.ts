@@ -1,3 +1,4 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest, NextResponse } from 'next/server';
 import { healthService } from '@/lib/platform/healthService';
 import { authenticateRequest } from '@/lib/security/auth-guard';
@@ -12,7 +13,7 @@ export const dynamic = 'force-dynamic';
  * Requires system:read scope or Admin authentication.
  * Executes live write-read-delete storage probe, verifies critical RPCs, queue depth, and worker fleet.
  */
-export async function GET(req: NextRequest) {
+async function handleGET(req: NextRequest) {
   const requestId = extractRequestId(req);
   try {
     // Protected endpoint: must have system:read scope or be admin
@@ -33,3 +34,5 @@ export async function GET(req: NextRequest) {
     return errorResponse(error, requestId);
   }
 }
+
+export const GET = withApiRoute(handleGET, 'system:read');

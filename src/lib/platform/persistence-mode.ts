@@ -13,7 +13,7 @@ import { ErrorCodes } from '@/lib/errors/codes';
  * Returns true if real database backend (Supabase PostgreSQL) is configured.
  */
 export function isPersistentMode(): boolean {
-  return Boolean(isSupabaseAdminConfigured() || isSupabaseConfigured());
+  return isSupabaseAdminConfigured();
 }
 
 /**
@@ -24,7 +24,7 @@ export function isMockModeAllowed(): boolean {
   if (process.env.NODE_ENV === 'production') {
     return false;
   }
-  return !isPersistentMode() || process.env.NODE_ENV === 'test';
+  return process.env.NODE_ENV === 'test' && process.env.ALLOW_TEST_MOCKS === 'true';
 }
 
 /**
@@ -32,7 +32,7 @@ export function isMockModeAllowed(): boolean {
  * Throws explicit AppError in production if persistent backend is missing.
  */
 export function assertPersistentBackend(serviceName: string): void {
-  if (process.env.NODE_ENV === 'production' && !isPersistentMode()) {
+  if (!isPersistentMode() && !isMockModeAllowed()) {
     throw AppError.internal(
       `Persistent database backend is required in production environment for ${serviceName}. Silent mock fallback is forbidden.`,
       ErrorCodes.PERSISTENCE_ERROR

@@ -296,7 +296,6 @@ export default function AnalyticsDashboardPage() {
                           <span className="font-mono text-slate-400 text-xs w-4">{idx + 1}.</span>
                           <div className="h-8 w-8 rounded-lg bg-slate-800 border border-slate-700/60 flex items-center justify-center overflow-hidden flex-shrink-0">
                             {asset.storageUrl ? (
-                              // eslint-disable-next-line @next/next/no-img-element
                               <img
                                 src={`/api/v1/delivery/${asset.assetId}?w=64&q=60`}
                                 alt=""

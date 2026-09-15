@@ -1,10 +1,11 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest } from 'next/server';
 import { developerService } from '@/services/developerService';
 import { authenticateRequest } from '@/lib/security/auth-guard';
 import { successResponse, errorResponse } from '@/lib/errors/response';
 import { AppError } from '@/lib/errors/app-error';
 
-export async function GET(req: NextRequest) {
+async function handleGET(req: NextRequest) {
   try {
     const principal = await authenticateRequest(req, 'apikey:read');
     const keys = await developerService.listApiKeys(principal.workspaceId);
@@ -14,7 +15,7 @@ export async function GET(req: NextRequest) {
   }
 }
 
-export async function POST(req: NextRequest) {
+async function handlePOST(req: NextRequest) {
   try {
     const principal = await authenticateRequest(req, 'apikey:create');
     const body = await req.json();
@@ -52,7 +53,7 @@ export async function POST(req: NextRequest) {
   }
 }
 
-export async function DELETE(req: NextRequest) {
+async function handleDELETE(req: NextRequest) {
   try {
     const principal = await authenticateRequest(req, 'apikey:revoke');
     const { searchParams } = new URL(req.url);
@@ -66,3 +67,11 @@ export async function DELETE(req: NextRequest) {
     return errorResponse(error);
   }
 }
+
+export const dynamic = 'force-dynamic';
+
+export const GET = withApiRoute(handleGET, 'apikey:read');
+
+export const POST = withApiRoute(handlePOST, 'apikey:create');
+
+export const DELETE = withApiRoute(handleDELETE, 'apikey:revoke');

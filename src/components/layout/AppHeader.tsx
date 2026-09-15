@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import {
   Search,
   Upload,
@@ -29,15 +29,6 @@ export function AppHeader({ onOpenUpload, onSearch }: AppHeaderProps) {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [createWsModalOpen, setCreateWsModalOpen] = useState(false);
   const [invitationsModalOpen, setInvitationsModalOpen] = useState(false);
-  const [isLocalHost, setIsLocalHost] = useState(false);
-
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const host = window.location.hostname;
-      setIsLocalHost(host === 'localhost' || host === '127.0.0.1');
-    }
-  }, []);
-
   const {
     user,
     workspace,
@@ -46,7 +37,6 @@ export function AppHeader({ onOpenUpload, onSearch }: AppHeaderProps) {
     pendingInvitesCount,
     can,
     logout,
-    switchRole,
     switchWorkspace,
     createWorkspace,
     acceptInvitation,
@@ -80,16 +70,17 @@ export function AppHeader({ onOpenUpload, onSearch }: AppHeaderProps) {
 
   return (
     <>
-      <header className="h-16 border-b border-slate-800 bg-slate-900/80 backdrop-blur px-4 sm:px-6 flex items-center justify-between sticky top-0 z-20">
+      <header className="h-16 border-b border-slate-800 bg-slate-900/80 backdrop-blur px-2 sm:px-6 gap-2 flex items-center justify-between sticky top-0 z-20">
         {/* Dynamic Workspace Selector */}
         <div className="flex items-center gap-4">
           <div className="relative">
             <button
+              aria-expanded={workspaceOpen}
               onClick={() => setWorkspaceOpen(!workspaceOpen)}
-              className="flex items-center gap-2.5 px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-800/80 text-sm font-medium text-slate-200 hover:bg-slate-700/80 transition min-h-[44px]"
+              className="flex items-center gap-1 sm:gap-2.5 px-2 sm:px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-800/80 text-sm font-medium text-slate-200 hover:bg-slate-700/80 transition min-h-[44px]"
             >
               <Building2 className="h-4 w-4 text-violet-400 flex-shrink-0" />
-              <span className="max-w-[140px] sm:max-w-[200px] truncate font-medium">
+              <span className="max-w-[70px] sm:max-w-[200px] truncate font-medium">
                 {workspace?.name || 'My Workspace'}
               </span>
               <ChevronDown className="h-3.5 w-3.5 text-slate-400 ml-1 flex-shrink-0" />
@@ -147,11 +138,12 @@ export function AppHeader({ onOpenUpload, onSearch }: AppHeaderProps) {
         </div>
 
         {/* Center Search */}
-        <div className="flex-1 max-w-md mx-4 sm:mx-6 hidden md:block">
+        {onSearch && <div className="flex-1 max-w-md mx-4 sm:mx-6 hidden md:block">
           <div className="relative">
             <Search className="h-4 w-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
+              aria-label="Search assets"
               placeholder="Search assets by name, ID (med_...), or tags..."
               value={searchValue}
               onChange={handleSearchChange}
@@ -160,8 +152,9 @@ export function AppHeader({ onOpenUpload, onSearch }: AppHeaderProps) {
           </div>
         </div>
 
+        }
         {/* Right Actions */}
-        <div className="flex items-center gap-2 sm:gap-3">
+        <div className="flex shrink-0 items-center gap-1 sm:gap-3">
           {/* Pending Invitations Badge Button */}
           <button
             type="button"
@@ -181,6 +174,7 @@ export function AppHeader({ onOpenUpload, onSearch }: AppHeaderProps) {
           {onOpenUpload && (
             canUpload ? (
               <button
+                aria-label="Upload Media"
                 onClick={onOpenUpload}
                 className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-violet-600 text-white text-xs sm:text-sm font-semibold hover:bg-violet-500 transition shadow-lg shadow-violet-600/20 min-h-[44px]"
               >
@@ -202,6 +196,8 @@ export function AppHeader({ onOpenUpload, onSearch }: AppHeaderProps) {
           {/* User Account & RBAC Dropdown */}
           <div className="relative">
             <button
+              aria-label="Account menu"
+              aria-expanded={userMenuOpen}
               onClick={() => setUserMenuOpen(!userMenuOpen)}
               className="flex items-center gap-2.5 p-1 pl-2.5 pr-2 rounded-full border border-slate-700 bg-slate-800 hover:bg-slate-700 transition min-h-[44px]"
             >
@@ -235,46 +231,6 @@ export function AppHeader({ onOpenUpload, onSearch }: AppHeaderProps) {
                   </div>
                   <div className="text-[11px] text-slate-400 mt-0.5 truncate">{user?.email}</div>
                 </div>
-
-                {/* RBAC Role Switcher (Localhost 3000 Only) */}
-                {isLocalHost && (
-                  <div className="py-2 border-b border-slate-800">
-                    <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider px-2 mb-1.5 flex items-center justify-between">
-                      <span className="flex items-center gap-1">
-                        <Shield className="h-3 w-3 text-violet-400" />
-                        <span>Switch Role (Test RBAC)</span>
-                      </span>
-                      <span className="text-[9px] text-amber-400 bg-amber-950/40 border border-amber-500/20 px-1.5 py-0.2 rounded font-mono">
-                        DEV ONLY
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-1.5 px-1">
-                      {(['admin', 'editor', 'viewer', 'developer'] as const).map((r) => {
-                        const isCurrent = user?.role === r;
-                        return (
-                          <button
-                            key={r}
-                            onClick={() => {
-                              switchRole(r);
-                              setUserMenuOpen(false);
-                            }}
-                            className={`text-xs py-2 px-2.5 rounded-lg text-left capitalize font-medium transition min-h-[44px] ${
-                              isCurrent
-                                ? 'bg-violet-600/20 text-violet-300 border border-violet-500/30'
-                                : 'text-slate-300 hover:bg-slate-800 border border-transparent'
-                            }`}
-                          >
-                            {r === 'admin' && '👑 '}
-                            {r === 'editor' && '✍️ '}
-                            {r === 'viewer' && '👁️ '}
-                            {r === 'developer' && '💻 '}
-                            {r}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
 
                 {/* Sign out */}
                 <button

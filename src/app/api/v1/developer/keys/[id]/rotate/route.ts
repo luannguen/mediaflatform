@@ -1,3 +1,4 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest } from 'next/server';
 import { authenticateRequest } from '@/lib/security/auth-guard';
 import { developerService } from '@/services/developerService';
@@ -10,7 +11,7 @@ import { successResponse, errorResponse } from '@/lib/errors/response';
  * Rotates an existing API key by generating a successor key with zero downtime.
  * Old key remains valid during the grace period (default 7 days).
  */
-export async function POST(
+async function handlePOST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -48,3 +49,7 @@ export async function POST(
     return errorResponse(error, requestId);
   }
 }
+
+export const dynamic = 'force-dynamic';
+
+export const POST = withApiRoute(handlePOST);

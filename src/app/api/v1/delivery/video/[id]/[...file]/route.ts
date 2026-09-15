@@ -1,3 +1,4 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest, NextResponse } from 'next/server';
 import { assetService } from '@/services/assetService';
 import { videoService } from '@/services/videoService';
@@ -6,7 +7,7 @@ import { authenticateRequest } from '@/lib/security/auth-guard';
 import { authorize } from '@/lib/security/resourceAuthorization';
 import { verifyDeliveryGrant, DeliveryGrantPermission } from '@/lib/security/delivery-grant';
 
-export async function GET(
+async function handleGET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string; file: string[] | string }> }
 ) {
@@ -148,13 +149,14 @@ export async function GET(
       }
     }
 
+    if (asset.status !== 'active' || asset.processing_status !== 'ready') return NextResponse.json({ error: 'ASSET_NOT_READY' }, { status: 425, headers: { 'Cache-Control': 'private, no-store', 'Retry-After': '5' } });
     const baseUrl = new URL(req.url).origin;
     const cacheHeader = isPrivate
       ? 'private, no-cache, no-store, must-revalidate'
-      : 'public, max-age=86400, s-maxage=86400, immutable';
+      : 'public, max-age=0, must-revalidate';
     const imageCacheHeader = isPrivate
       ? 'private, no-cache, no-store, must-revalidate'
-      : 'public, max-age=31536000, s-maxage=31536000, immutable';
+      : 'public, max-age=0, must-revalidate';
 
     const baseHeaders: Record<string, string> = {
       'Access-Control-Allow-Origin': '*',
@@ -303,7 +305,7 @@ export async function GET(
           status: 307,
           headers: {
             ...baseHeaders,
-            'Cache-Control': isPrivate ? 'private, no-cache, no-store, must-revalidate' : 'public, max-age=31536000, s-maxage=31536000, immutable',
+            'Cache-Control': isPrivate ? 'private, no-cache, no-store, must-revalidate' : 'public, max-age=0, must-revalidate',
           },
         });
       }
@@ -326,3 +328,7 @@ export async function GET(
     return new NextResponse(`Video streaming error: ${error.message}`, { status: 500 });
   }
 }
+
+export const dynamic = 'force-dynamic';
+
+export const GET = withApiRoute(handleGET, 'assets:read');

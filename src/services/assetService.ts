@@ -145,7 +145,7 @@ export const assetService = {
       }
 
       return {
-        assets: resultAssets,
+        assets: resultAssets.map(a => ({...a, storage_url: '/api/v1/delivery/' + a.id})),
         total,
         page: params.cursor ? undefined : page,
         limit,
@@ -281,7 +281,7 @@ export const assetService = {
     }
 
     return {
-      assets: resultAssets,
+      assets: resultAssets.map(a => ({...a, storage_url: '/api/v1/delivery/' + a.id})),
       total,
       page: params.cursor ? undefined : page,
       limit,
@@ -324,7 +324,7 @@ export const assetService = {
       .map((id) => foundAssets.find((a) => a.id === id))
       .filter(Boolean) as Asset[];
 
-    if (!fields || fields.length === 0) return ordered;
+    if (!fields || fields.length === 0) return ordered.map(a => ({...a, storage_url: '/api/v1/delivery/' + a.id}));
 
     const set = new Set([...fields, 'id']);
     return ordered.map((item) => {
@@ -360,7 +360,7 @@ export const assetService = {
       .select('*', { count: 'exact', head: true })
       .eq('asset_id', id);
 
-    return { ...(asset as Asset), referencesCount: refCount || 0 };
+    return { ...(asset as Asset), storage_url: '/api/v1/delivery/' + asset.id, referencesCount: refCount || 0 };
   },
 
   /**
@@ -528,6 +528,9 @@ export const assetService = {
 
       // Metadata JSON updates (merge focal_point, tags, etc.)
       if (patch.metadata_json !== undefined) {
+        if (!patch.metadata_json || typeof patch.metadata_json !== 'object' || Array.isArray(patch.metadata_json)) throw AppError.badRequest('Metadata must be an object');
+        const reserved = ['active_output_version','checksum_verified','content_verified_at','purge_pending','purge_not_before','session_id','document','video','image','hls','palette','declared_checksum'];
+        if (reserved.some(key => key in patch.metadata_json!)) throw AppError.badRequest('System metadata cannot be edited');
         sanitizedPatch.metadata_json = {
           ...(currentAsset.metadata_json || {}),
           ...patch.metadata_json,
@@ -584,11 +587,9 @@ export const assetService = {
   },
 
   async restoreAsset(id: string, workspaceId: string = mockWorkspace.id): Promise<Asset> {
-    const res = await this.updateAsset(id, workspaceId, {
-      status: 'active',
-      deleted_at: null,
-      purge_after: null,
-    });
+    const { data: res, error } = await supabaseAdmin.rpc('restore_media_asset', { p_asset_id: id, p_workspace_id: workspaceId });
+    if (error) throw AppError.conflict('Asset cannot be restored in its current state');
+
 
     webhookService
       .dispatchEvent(workspaceId, 'asset.restored', {
@@ -657,7 +658,7 @@ export const assetService = {
     }
 
     // Execute comprehensive artifact graph purge
-    const purgeResult = await purgeService.purgeAssetArtifactGraph(id, workspaceId);
+    const purgeResult = await purgeService.purgeAssetArtifactGraph(id, workspaceId, force);
 
     webhookService
       .dispatchEvent(workspaceId, 'asset.deleted', {

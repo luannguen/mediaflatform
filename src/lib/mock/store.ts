@@ -336,7 +336,19 @@ declare global {
   var __mockDb: MockDatabase | undefined;
 }
 
-export const mockDb = globalThis.__mockDb || (globalThis.__mockDb = new MockDatabase());
+const testMode = process.env.NODE_ENV === 'test' && process.env.ALLOW_TEST_MOCKS === 'true';
+const rawTestDb = testMode ? (globalThis.__mockDb || (globalThis.__mockDb = new MockDatabase())) : undefined;
+export const mockDb: MockDatabase = new Proxy({} as MockDatabase, {
+  get(_target, property) {
+    if (!testMode || !rawTestDb) throw new Error('Mock persistence is only available in explicitly configured tests');
+    return Reflect.get(rawTestDb, property);
+  },
+  set(_target, property, value) {
+    if (!testMode || !rawTestDb) throw new Error('Mock persistence is only available in explicitly configured tests');
+    return Reflect.set(rawTestDb, property, value);
+  },
+});
+if (testMode) {
 
 // Ensure newly added collections exist on hot-reloaded singleton
 if (!mockDb.workspaces || mockDb.workspaces.length === 0) {
@@ -431,4 +443,6 @@ if (!mockDb.invitations || mockDb.invitations.length === 0) {
       expires_at: new Date(Date.now() + 86400000 * 7).toISOString(),
     },
   ];
+}
+
 }

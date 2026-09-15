@@ -1,3 +1,4 @@
+import { assertPersistentBackend } from '@/lib/platform/persistence-mode';
 import crypto from 'crypto';
 import { isSupabaseAdminConfigured, supabaseAdmin } from '@/lib/supabase/admin';
 import { AppError } from '@/lib/errors/app-error';
@@ -114,6 +115,7 @@ export const idempotencyService = {
 
     // Fast In-Memory Check for local test / non-Supabase environments
     if (!isSupabaseAdminConfigured()) {
+      assertPersistentBackend('request protection');
       const existing = memoryIdempotency.get(recordKey);
       if (existing) {
         if (new Date(existing.expires_at).getTime() <= now) {
@@ -275,6 +277,7 @@ export const idempotencyService = {
     const safeHeaders = filterSafeHeaders(responseHeaders);
 
     if (!isSupabaseAdminConfigured()) {
+      assertPersistentBackend('request protection');
       const hash = this.computeFingerprint('POST', route, payload);
       const recordKey = `${workspaceId}:${idempotencyKey}`;
       const mem = memoryIdempotency.get(recordKey);
@@ -345,6 +348,7 @@ export const idempotencyService = {
     executionToken?: string
   ): Promise<FencedOperationResult> {
     if (!isSupabaseAdminConfigured()) {
+      assertPersistentBackend('request protection');
       const recordKey = `${workspaceId}:${idempotencyKey}`;
       const mem = memoryIdempotency.get(recordKey);
       if (mem) {
@@ -392,6 +396,7 @@ export const idempotencyService = {
     leaseSeconds: number = DEFAULT_LEASE_SECONDS
   ): Promise<FencedOperationResult> {
     if (!isSupabaseAdminConfigured()) {
+      assertPersistentBackend('request protection');
       const recordKey = `${workspaceId}:${idempotencyKey}`;
       const now = Date.now();
       const mem = memoryIdempotency.get(recordKey);

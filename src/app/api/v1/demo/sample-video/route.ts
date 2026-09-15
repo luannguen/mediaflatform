@@ -1,3 +1,5 @@
+import { AppError } from '@/lib/errors/app-error';
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest } from 'next/server';
 import { authenticateRequest } from '@/lib/security/auth-guard';
 import { successResponse, errorResponse } from '@/lib/errors/response';
@@ -13,7 +15,8 @@ import crypto from 'crypto';
 
 const execFileAsync = promisify(execFile);
 
-export async function POST(req: NextRequest) {
+async function handlePOST(req: NextRequest) {
+  if (process.env.DEMO_ENABLED !== 'true') throw AppError.notFound('Demo is not enabled');
   const tempDir = path.join(process.cwd(), 'scratch', 'temp_demo_videos');
   const tempFilename = `sample_720p_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.mp4`;
   const tempFilePath = path.join(tempDir, tempFilename);
@@ -122,3 +125,7 @@ export async function POST(req: NextRequest) {
     }
   }
 }
+
+export const dynamic = 'force-dynamic';
+
+export const POST = withApiRoute(handlePOST, 'assets:write');

@@ -72,10 +72,10 @@ export function useAssets(initialFilters: UseAssetsFilters = {}) {
 
   const restoreAsset = async (id: string) => {
     try {
-      const res = await fetch(`/api/v1/assets/${id}`, {
-        method: 'PATCH',
+      const res = await fetch(`/api/v1/assets/${id}/restore`, {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'active', deleted_at: null }),
+        body: JSON.stringify({}),
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error?.message || 'Failed to restore asset');

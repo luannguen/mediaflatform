@@ -1,3 +1,4 @@
+import { withApiRoute } from '@/lib/platform/apiRoute';
 import { NextRequest } from 'next/server';
 import { authenticateRequest } from '@/lib/security/auth-guard';
 import { invitationService } from '@/services/invitationService';
@@ -6,13 +7,14 @@ import { AppError } from '@/lib/errors/app-error';
 import { ErrorCodes } from '@/lib/errors/codes';
 import { UserRole } from '@/lib/auth/session';
 
-export async function GET(
+async function handleGET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const { id: workspaceId } = await params;
     const principal = await authenticateRequest(req);
+    if (principal.workspaceId !== workspaceId || principal.type !== 'user') throw AppError.forbidden('Workspace access denied');
 
     if (principal.role !== 'owner' && principal.role !== 'admin') {
       throw AppError.forbidden('Only workspace owners and admins can view sent invitations', ErrorCodes.PERMISSION_DENIED);
@@ -25,13 +27,14 @@ export async function GET(
   }
 }
 
-export async function POST(
+async function handlePOST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const { id: workspaceId } = await params;
     const principal = await authenticateRequest(req);
+    if (principal.workspaceId !== workspaceId || principal.type !== 'user') throw AppError.forbidden('Workspace access denied');
 
     if (principal.role !== 'owner' && principal.role !== 'admin') {
       throw AppError.forbidden('Only workspace owners and admins can invite members', ErrorCodes.PERMISSION_DENIED);
@@ -40,7 +43,7 @@ export async function POST(
     const body = await req.json();
     const { email, role = 'viewer' } = body;
 
-    if (!email || !email.includes('@')) {
+    if (typeof email !== 'string' || !email.includes('@')) {
       throw AppError.badRequest('A valid email address is required', ErrorCodes.VALIDATION_ERROR);
     }
 
@@ -62,3 +65,9 @@ export async function POST(
     return errorResponse(error);
   }
 }
+
+export const dynamic = 'force-dynamic';
+
+export const GET = withApiRoute(handleGET);
+
+export const POST = withApiRoute(handlePOST);

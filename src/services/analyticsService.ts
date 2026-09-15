@@ -1,5 +1,6 @@
 import { isSupabaseAdminConfigured, supabaseAdmin } from '@/lib/supabase/admin';
 import { mockDb, mockWorkspace } from '@/lib/mock/store';
+import { AppError } from '@/lib/errors/app-error';
 import { generateId } from '@/lib/ids/generator';
 import { UsageMetric } from '@/types/database';
 
@@ -112,17 +113,9 @@ export const analyticsService = {
           new Date(m.created_at).getTime() >= sinceTime.getTime()
       );
     } else {
-      const { data, error } = await supabaseAdmin
-        .from('usage_metrics')
-        .select('*')
-        .eq('workspace_id', workspaceId)
-        .gte('created_at', sinceTime.toISOString())
-        .order('created_at', { ascending: false })
-        .limit(2000);
-
-      if (!error && data) {
-        metrics = data as UsageMetric[];
-      }
+      const { data, error } = await supabaseAdmin.rpc('workspace_media_analytics', { p_workspace: workspaceId, p_since: sinceTime.toISOString() });
+      if (error || !data) throw AppError.serviceUnavailable('Analytics data is unavailable');
+      return { workspaceId, period, ...data } as AnalyticsSummary;
     }
 
     // Production Invariant: Empty metrics return real zero telemetry without injecting fake data
@@ -176,15 +169,21 @@ export const analyticsService = {
       .sort((a, b) => b[1].count - a[1].count)
       .slice(0, 10);
 
+    let assetRows;
+    if (isSupabaseAdminConfigured()) {
+      const { data, error } = await supabaseAdmin.from('assets').select('id,display_name,mime_type').eq('workspace_id', workspaceId).in('id', sortedAssets.map(([id]) => id));
+      if (error) throw AppError.serviceUnavailable('Asset summaries are unavailable');
+      assetRows = data || [];
+    } else { assetRows = mockDb.assets; }
     const topAssets = sortedAssets.map(([assetId, data]) => {
-      const foundMock = mockDb.assets.find((a) => a.id === assetId);
+      const foundMock = assetRows.find((a) => a.id === assetId);
       return {
         assetId,
         displayName: foundMock?.display_name || assetId,
-        mimeType: foundMock?.mime_type || 'image/jpeg',
+        mimeType: foundMock?.mime_type || 'application/octet-stream',
         requestsCount: data.count,
         bytesTransferred: data.bytes,
-        storageUrl: foundMock?.storage_url || null,
+        storageUrl: foundMock ? '/api/v1/delivery/' + assetId + '?w=160' : null,
       };
     });
 

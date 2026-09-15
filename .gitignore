@@ -55,3 +55,7 @@ ehthumbs.db
 *.tmp
 *.bak
 /scratch/
+
+/packages/sdk/dist/
+/output/playwright/
+/.playwright-cli/
